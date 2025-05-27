@@ -103,12 +103,30 @@ class ServerManager:
                 server_config["username"] = os.getenv(f"{prefix}MSSQL_ENTRA_USERNAME", 
                                                      config.get(section, "MSSQL_ENTRA_USERNAME", fallback=None))
                 
+                # Add interactive auth specific parameters
+                auth_mode = os.getenv(f"{prefix}MSSQL_AUTH_MODE",
+                                     config.get(section, "MSSQL_AUTH_MODE", fallback="")).lower()
+                if auth_mode == "interactive":
+                    server_config["auth_mode"] = "interactive"
+                    server_config["token_cache_file"] = os.getenv(
+                        f"{prefix}MSSQL_TOKEN_CACHE_FILE",
+                        config.get(section, "MSSQL_TOKEN_CACHE_FILE", fallback=None)
+                    )
+                    use_device_code = os.getenv(
+                        f"{prefix}MSSQL_USE_DEVICE_CODE",
+                        config.get(section, "MSSQL_USE_DEVICE_CODE", fallback="")
+                    )
+                    server_config["use_device_code"] = use_device_code.lower() in ("true", "yes", "1")
+                
                 if not all([server_config["client_id"], server_config["tenant_id"]]):
                     logger.warning(f"Skipping server configuration '{section}': Missing Entra ID configuration")
                     continue
                 
-                # Either username or client_secret is required for authentication
-                if not server_config["username"] and not server_config["client_secret"]:
+                # For interactive auth, we don't need username/password or client_secret
+                if server_config.get("auth_mode") == "interactive":
+                    pass  # No additional validation needed
+                # For non-interactive auth, either username or client_secret is required
+                elif not server_config["username"] and not server_config["client_secret"]:
                     logger.warning(f"Skipping server configuration '{section}': Missing Entra ID credentials")
                     continue
             else:

@@ -1,6 +1,9 @@
 import asyncio
 import logging
 import os
+import json
+import webbrowser
+import time
 import pymssql
 import msal  # For Microsoft Authentication
 from dotenv import load_dotenv  # For .env file support
@@ -56,12 +59,22 @@ def get_db_config():
         config["client_secret"] = os.getenv("MSSQL_CLIENT_SECRET")
         config["username"] = os.getenv("MSSQL_ENTRA_USERNAME")  # For UserID authentication
         
+        # Interactive auth settings
+        auth_mode = os.getenv("MSSQL_AUTH_MODE", "").lower()
+        if auth_mode == "interactive":
+            config["auth_mode"] = "interactive"
+            config["token_cache_file"] = os.getenv("MSSQL_TOKEN_CACHE_FILE")
+            config["use_device_code"] = os.getenv("MSSQL_USE_DEVICE_CODE", "").lower() in ("true", "yes", "1")
+        
         if not all([config["client_id"], config["tenant_id"]]):
             logger.error("Entra authentication requires MSSQL_CLIENT_ID and MSSQL_TENANT_ID")
             raise ValueError("Missing Entra ID configuration")
             
-        # Either username or client_secret is required for authentication
-        if not config["username"] and not config["client_secret"]:
+        # For interactive auth, we don't need username/password or client_secret
+        if config.get("auth_mode") == "interactive":
+            pass  # No additional validation needed
+        # For non-interactive auth, either username or client_secret is required
+        elif not config["username"] and not config["client_secret"]:
             logger.error("Entra authentication requires either a username or client_secret")
             raise ValueError("Missing Entra ID credentials")
     else:
@@ -70,11 +83,54 @@ def get_db_config():
     
     return config
 
+def load_token_cache(cache_file_path):
+    """Load token cache from file if it exists.
+    
+    Args:
+        cache_file_path: Path to the token cache file
+        
+    Returns:
+        dict: Token cache or empty dict if file doesn't exist
+    """
+    if not cache_file_path:
+        return {}
+    
+    try:
+        if os.path.exists(cache_file_path):
+            with open(cache_file_path, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load token cache: {str(e)}")
+    
+    return {}
+
+def save_token_cache(cache_data, cache_file_path):
+    """Save token cache to file.
+    
+    Args:
+        cache_data: Token cache data to save
+        cache_file_path: Path to save the cache file
+    """
+    if not cache_file_path:
+        return
+    
+    try:
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(os.path.abspath(cache_file_path)), exist_ok=True)
+        
+        with open(cache_file_path, 'w') as f:
+            json.dump(cache_data, f)
+    except Exception as e:
+        logger.warning(f"Failed to save token cache: {str(e)}")
+
 def get_entra_token(config):
     """Acquire an access token from Entra ID (formerly Azure AD).
     
-    Supports both service principal authentication (using client_secret)
-    and user authentication (using username/password).
+    Supports multiple authentication methods:
+    1. Service principal authentication (using client_secret)
+    2. User authentication (using username/password)
+    3. Interactive browser-based authentication
+    4. Device code flow authentication
     
     Args:
         config: Dictionary containing authentication parameters
@@ -85,38 +141,111 @@ def get_entra_token(config):
     Raises:
         ValueError: If token acquisition fails
     """
-    if "client_secret" in config and config["client_secret"]:
+    # Define the scope for SQL Server
+    scopes = ["https://database.windows.net/.default"]
+    
+    # Initialize token cache if specified
+    token_cache = None
+    if "token_cache_file" in config and config["token_cache_file"]:
+        cache_file_path = config["token_cache_file"]
+        token_cache = msal.SerializableTokenCache()
+        token_cache.deserialize(json.dumps(load_token_cache(cache_file_path)))
+    
+    # Client ID and tenant ID are required for all flows
+    client_id = config["client_id"]
+    tenant_id = config["tenant_id"]
+    authority = f"https://login.microsoftonline.com/{tenant_id}"
+    
+    # Check the authentication mode
+    if config.get("auth_mode") == "interactive":
+        # Interactive authentication
+        app = msal.PublicClientApplication(
+            client_id=client_id,
+            authority=authority,
+            token_cache=token_cache
+        )
+        
+        # Check if we already have a cached token
+        accounts = app.get_accounts()
+        if accounts:
+            logger.info(f"Found cached account: {accounts[0]['username']}")
+            # Try to silently acquire token from cache
+            result = app.acquire_token_silent(scopes, account=accounts[0])
+            if result and "access_token" in result:
+                logger.info("Successfully acquired token from cache")
+                return result["access_token"]
+        
+        # If device code flow is requested
+        if config.get("use_device_code", False):
+            logger.info("Starting device code flow authentication")
+            # Device code flow (useful for environments without browsers)
+            flow = app.initiate_device_flow(scopes=scopes)
+            if "user_code" not in flow:
+                error = flow.get("error", "Unknown error")
+                error_desc = flow.get("error_description", "No description")
+                logger.error(f"Failed to initiate device code flow: {error} - {error_desc}")
+                raise ValueError(f"Failed to initiate device code flow: {error}")
+            
+            # Display instructions to the user
+            print("\n" + "-" * 60)
+            print("MICROSOFT ENTRA ID AUTHENTICATION REQUIRED")
+            print("-" * 60)
+            print(f"To sign in, use a web browser to open the page {flow['verification_uri']}")
+            print(f"and enter the code {flow['user_code']} to authenticate.")
+            print("-" * 60 + "\n")
+            
+            # Wait for user to complete the flow
+            result = app.acquire_token_by_device_flow(flow)
+        else:
+            # Standard interactive authentication with browser
+            logger.info("Starting interactive browser authentication")
+            # Use the systems default browser for authentication
+            result = app.acquire_token_interactive(
+                scopes=scopes,
+                prompt="select_account"  # Force account selection even if only one account exists
+            )
+    
+    elif "client_secret" in config and config["client_secret"]:
         # Application authentication (service principal)
         app = msal.ConfidentialClientApplication(
-            config["client_id"],
-            authority=f"https://login.microsoftonline.com/{config['tenant_id']}",
-            client_credential=config["client_secret"]
+            client_id=client_id,
+            authority=authority,
+            client_credential=config["client_secret"],
+            token_cache=token_cache
         )
-        result = app.acquire_token_for_client(scopes=["https://database.windows.net/.default"])
+        result = app.acquire_token_for_client(scopes=scopes)
     else:
         # User ID authentication
         app = msal.PublicClientApplication(
-            config["client_id"],
-            authority=f"https://login.microsoftonline.com/{config['tenant_id']}"
+            client_id=client_id,
+            authority=authority,
+            token_cache=token_cache
         )
-        # Use username/password if available, otherwise this would require interactive login
+        # Use username/password if available, otherwise raise error
         password = os.getenv("MSSQL_ENTRA_PASSWORD")
-        if password:
+        if config["username"] and password:
             result = app.acquire_token_by_username_password(
                 config["username"],
                 password,
-                scopes=["https://database.windows.net/.default"]
+                scopes=scopes
             )
         else:
-            # Interactive authentication not supported in this implementation
-            logger.error("Interactive Entra authentication not supported in this implementation")
-            raise ValueError("Interactive Entra authentication not supported")
+            # This is now a configuration error, since we support interactive auth
+            logger.error("Missing credentials for non-interactive authentication")
+            raise ValueError("Missing credentials for non-interactive authentication")
     
+    # Save token cache if specified
+    if token_cache and config.get("token_cache_file"):
+        cache_data = json.loads(token_cache.serialize())
+        save_token_cache(cache_data, config["token_cache_file"])
+    
+    # Check if token acquisition was successful
     if "access_token" not in result:
         error_desc = result.get('error_description', result.get('error', 'Unknown error'))
         logger.error(f"Token acquisition error: {error_desc}")
         raise ValueError(f"Failed to acquire token: {error_desc}")
-        
+    
+    logger.info("Successfully acquired Entra ID token")
     return result["access_token"]
 
 def create_connection(config):
@@ -309,6 +438,19 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {}
             }
+        ),
+        Tool(
+            name="refresh_auth",
+            description="Refresh the authentication for the current server",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "server": {
+                        "type": "string",
+                        "description": "The server name to refresh authentication for (optional, uses active server if not specified)"
+                    }
+                }
+            }
         )
     ]
 
@@ -325,10 +467,22 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         
         result = ["Available SQL Server connections:"]
         for server in servers:
+            auth_type = server.config.get("auth_type", "sql")
+            auth_mode = server.config.get("auth_mode", "")
+            auth_info = "SQL Auth"
+            
+            if auth_type == "entra":
+                if auth_mode == "interactive":
+                    auth_info = "Entra ID (Interactive)"
+                elif server.config.get("client_secret"):
+                    auth_info = "Entra ID (Service Principal)"
+                elif server.config.get("username"):
+                    auth_info = "Entra ID (Username)"
+            
             if server.name == active:
-                result.append(f"* {server.display_name} (ACTIVE)")
+                result.append(f"* {server.display_name} [{auth_info}] (ACTIVE)")
             else:
-                result.append(f"  {server.display_name}")
+                result.append(f"  {server.display_name} [{auth_info}]")
                 
         return [TextContent(type="text", text="\n".join(result))]
         
@@ -348,6 +502,50 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(
                 type="text", 
                 text=f"Error: Unknown server '{server_name}'. Available servers: {available}"
+            )]
+    
+    elif name == "refresh_auth":
+        # Determine which server to use
+        server_name = arguments.get("server")
+        if server_name:
+            if not server_manager.set_active_server(server_name):
+                available = ", ".join([s.name for s in server_manager.get_server_list()])
+                return [TextContent(
+                    type="text", 
+                    text=f"Error: Unknown server '{server_name}'. Available servers: {available}"
+                )]
+        
+        # Get active server configuration
+        server_name = server_manager.active_server
+        config = server_manager.get_active_config()
+        if not config:
+            return [TextContent(type="text", text="Error: No active server configuration available")]
+        
+        # Only attempt to refresh Entra ID authentication
+        if config.get("auth_type") != "entra":
+            return [TextContent(
+                type="text", 
+                text=f"Error: Server '{server_name}' does not use Entra ID authentication"
+            )]
+        
+        try:
+            # Force token refresh by clearing token cache if it exists
+            if config.get("token_cache_file") and os.path.exists(config["token_cache_file"]):
+                os.remove(config["token_cache_file"])
+                
+            # Test connection to force new authentication
+            conn = create_connection(config)
+            conn.close()
+            
+            return [TextContent(
+                type="text", 
+                text=f"Authentication refreshed successfully for server: {server_name}"
+            )]
+        except Exception as e:
+            logger.error(f"Failed to refresh authentication: {str(e)}")
+            return [TextContent(
+                type="text", 
+                text=f"Error refreshing authentication: {str(e)}"
             )]
     
     # Handle SQL execution
@@ -421,6 +619,28 @@ async def main():
     if active_server:
         server = server_manager.get_server_by_name(active_server)
         logger.info(f"Active server: {server.display_name}")
+        
+        # Log authentication type
+        config = server.config
+        if config.get("auth_type") == "entra":
+            if config.get("auth_mode") == "interactive":
+                auth_method = "Entra ID (Interactive)"
+                auth_details = f"using client ID {config['client_id']}"
+                if config.get("use_device_code"):
+                    auth_details += " with device code flow"
+                else:
+                    auth_details += " with browser flow"
+            elif config.get("client_secret"):
+                auth_method = "Entra ID (Service Principal)"
+                auth_details = f"using client ID {config['client_id']}"
+            else:
+                auth_method = "Entra ID (Username/Password)"
+                auth_details = f"as user {config.get('username', 'unknown')}"
+        else:
+            auth_method = "SQL Authentication"
+            auth_details = f"as {config['user']}"
+        
+        logger.info(f"Authentication: {auth_method} {auth_details}")
         
         # Log available servers
         servers = server_manager.get_server_list()
