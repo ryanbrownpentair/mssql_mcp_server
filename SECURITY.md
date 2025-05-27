@@ -1,5 +1,110 @@
 ## Microsoft SQL Server Security Configuration
 
+### Authentication Options
+
+This MCP server supports two authentication methods:
+
+#### 1. SQL Server Authentication
+Use a dedicated SQL login with minimal permissions as described below.
+
+#### 2. Entra ID Authentication (formerly Azure AD)
+Use Microsoft Entra ID for enhanced security with either service principal or user authentication.
+
+### Entra ID Authentication Setup
+
+#### Service Principal Authentication
+
+For enhanced security with service principal authentication:
+
+1. **Register an Application in Azure Portal**:
+   - Navigate to Azure Portal > App registrations
+   - Create a new registration
+   - Name your application
+   - Select the appropriate supported account type
+   - No redirect URI is needed
+
+2. **Create a Client Secret**:
+   - In your registered app, go to "Certificates & secrets"
+   - Create a new client secret
+   - Set description and expiration
+   - Save the secret value (shown only once)
+
+3. **Grant SQL Server Access**:
+   - In SQL Server, create a user from the external provider:
+   ```sql
+   CREATE USER [your-app-name] FROM EXTERNAL PROVIDER;
+   ALTER ROLE db_datareader ADD MEMBER [your-app-name];
+   -- Add additional roles as needed
+   ```
+
+4. **Configure Environment Variables**:
+   ```bash
+   MSSQL_AUTH_TYPE=entra
+   MSSQL_SERVER=your-server.database.windows.net
+   MSSQL_DATABASE=your_database
+   MSSQL_CLIENT_ID=your_app_client_id
+   MSSQL_TENANT_ID=your_tenant_id
+   MSSQL_CLIENT_SECRET=your_client_secret
+   ```
+
+#### User ID Authentication
+
+For user-based authentication:
+
+1. **Register an Application**:
+   - Similar to above, register an app in Azure Portal
+   - Under "Authentication" > "Advanced settings", enable "Allow public client flows"
+
+2. **Configure API Permissions**:
+   - Add "Microsoft Graph" > "User.Read" permission
+   - Add "Azure SQL Database" > "user_impersonation" permission
+   - Grant admin consent if required
+
+3. **Configure SQL Server**:
+   ```sql
+   -- Add Entra ID user
+   CREATE USER [user@yourdomain.com] FROM EXTERNAL PROVIDER;
+   ALTER ROLE db_datareader ADD MEMBER [user@yourdomain.com];
+   -- Add additional roles as needed
+   ```
+
+4. **Configure Environment Variables**:
+   ```bash
+   MSSQL_AUTH_TYPE=entra
+   MSSQL_SERVER=your-server.database.windows.net
+   MSSQL_DATABASE=your_database
+   MSSQL_CLIENT_ID=your_app_client_id
+   MSSQL_TENANT_ID=your_tenant_id
+   MSSQL_ENTRA_USERNAME=your_email@domain.com
+   # MSSQL_ENTRA_PASSWORD is optional and not recommended for security reasons
+   ```
+
+#### Security Best Practices for Entra ID Authentication
+
+1. **Credential Management**:
+   - Regularly rotate client secrets
+   - Use managed identities where possible
+   - Store secrets in Azure Key Vault
+   - Never commit secrets to source control
+
+2. **Permission Scope**:
+   - Assign minimal required permissions
+   - Use conditional access policies
+   - Enable multi-factor authentication
+   - Regularly audit access
+
+3. **Application Registration**:
+   - Restrict the application to specific tenants
+   - Limit redirect URIs
+   - Configure approved client applications
+   - Enable publisher verification
+
+4. **Monitoring**:
+   - Enable audit logging
+   - Monitor for suspicious sign-in attempts
+   - Set up alerts for unusual access patterns
+   - Review access regularly
+
 ### Creating a Restricted SQL Server Login
 
 It's crucial to create a dedicated SQL Server login with minimal permissions for the MCP server. Never use the 'sa' account or a login with full administrative privileges.

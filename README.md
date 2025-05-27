@@ -25,20 +25,54 @@ pip install mssql-mcp-server
 
 ## Configuration
 
+This server supports two authentication methods:
+
+### SQL Authentication
+
 Set the following environment variables:
 
 ```bash
+MSSQL_AUTH_TYPE=sql  # Default if not specified
 MSSQL_SERVER=localhost
 MSSQL_USER=your_username
 MSSQL_PASSWORD=your_password
 MSSQL_DATABASE=your_database
 ```
 
+### Entra ID Authentication (formerly Azure AD)
+
+For service principal authentication:
+
+```bash
+MSSQL_AUTH_TYPE=entra
+MSSQL_SERVER=your-server.database.windows.net
+MSSQL_DATABASE=your_database
+MSSQL_CLIENT_ID=your_app_client_id
+MSSQL_TENANT_ID=your_tenant_id
+MSSQL_CLIENT_SECRET=your_client_secret
+```
+
+For user ID authentication:
+
+```bash
+MSSQL_AUTH_TYPE=entra
+MSSQL_SERVER=your-server.database.windows.net
+MSSQL_DATABASE=your_database
+MSSQL_CLIENT_ID=your_app_client_id
+MSSQL_TENANT_ID=your_tenant_id
+MSSQL_ENTRA_USERNAME=your_email@domain.com
+MSSQL_ENTRA_PASSWORD=your_password  # Optional, not recommended for security reasons
+```
+
+You can also use a `.env` file to store these configuration values.
+
 ## Usage
 
 ### With Claude Desktop
 
 Add this to your `claude_desktop_config.json`:
+
+#### SQL Authentication
 
 ```json
 {
@@ -52,10 +86,64 @@ Add this to your `claude_desktop_config.json`:
         "mssql_mcp_server"
       ],
       "env": {
+        "MSSQL_AUTH_TYPE": "sql",
         "MSSQL_SERVER": "localhost",
         "MSSQL_USER": "your_username",
         "MSSQL_PASSWORD": "your_password",
         "MSSQL_DATABASE": "your_database"
+      }
+    }
+  }
+}
+```
+
+#### Entra ID Authentication (Service Principal)
+
+```json
+{
+  "mcpServers": {
+    "mssql": {
+      "command": "uv",
+      "args": [
+        "--directory", 
+        "path/to/mssql_mcp_server",
+        "run",
+        "mssql_mcp_server"
+      ],
+      "env": {
+        "MSSQL_AUTH_TYPE": "entra",
+        "MSSQL_SERVER": "your-server.database.windows.net",
+        "MSSQL_DATABASE": "your_database",
+        "MSSQL_CLIENT_ID": "your_app_client_id",
+        "MSSQL_TENANT_ID": "your_tenant_id",
+        "MSSQL_CLIENT_SECRET": "your_client_secret"
+      }
+    }
+  }
+}
+```
+
+#### Entra ID Authentication (User ID)
+
+```json
+{
+  "mcpServers": {
+    "mssql": {
+      "command": "uv",
+      "args": [
+        "--directory", 
+        "path/to/mssql_mcp_server",
+        "run",
+        "mssql_mcp_server"
+      ],
+      "env": {
+        "MSSQL_AUTH_TYPE": "entra",
+        "MSSQL_SERVER": "your-server.database.windows.net",
+        "MSSQL_DATABASE": "your_database",
+        "MSSQL_CLIENT_ID": "your_app_client_id",
+        "MSSQL_TENANT_ID": "your_tenant_id",
+        "MSSQL_ENTRA_USERNAME": "your_email@domain.com"
+        // Note: Password should be handled securely, not in config
       }
     }
   }
