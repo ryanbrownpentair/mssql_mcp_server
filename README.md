@@ -11,6 +11,9 @@ A Model Context Protocol (MCP) server that enables secure interaction with Micro
 - List available SQL Server tables as resources
 - Read table contents
 - Execute SQL queries with proper error handling
+- Multiple authentication methods (SQL, Windows, and Entra ID)
+- Multiple server configuration support
+- Interactive authentication support for Entra ID
 - Secure database access through environment variables
 - Comprehensive logging
 - Automatic system dependency installation
@@ -25,9 +28,35 @@ pip install mssql-mcp-server
 
 ## Configuration
 
-This server supports two authentication methods:
+This server supports multiple authentication methods and multiple server configurations.
 
-### SQL Authentication
+### Multiple Server Configuration
+
+You can configure multiple SQL Server connections using a `.env` file:
+
+```ini
+# Default SQL Server Configuration
+MSSQL_DEFAULT_SERVER=default
+
+# SQL Server Configurations (server1, server2, ...)
+[default]
+MSSQL_AUTH_TYPE=sql
+MSSQL_SERVER=localhost
+MSSQL_USER=your_username
+MSSQL_PASSWORD=your_password
+MSSQL_DATABASE=your_database
+
+[production]
+MSSQL_AUTH_TYPE=sql
+MSSQL_SERVER=production-server
+MSSQL_USER=prod_username
+MSSQL_PASSWORD=prod_password
+MSSQL_DATABASE=production_db
+```
+
+### Authentication Methods
+
+#### 1. SQL Authentication
 
 Set the following environment variables:
 
@@ -39,7 +68,17 @@ MSSQL_PASSWORD=your_password
 MSSQL_DATABASE=your_database
 ```
 
-### Entra ID Authentication (formerly Azure AD)
+#### 2. Windows Authentication
+
+For integrated Windows authentication:
+
+```bash
+MSSQL_AUTH_TYPE=windows
+MSSQL_SERVER=localhost
+MSSQL_DATABASE=your_database
+```
+
+#### 3. Entra ID Authentication (formerly Azure AD)
 
 For service principal authentication:
 
@@ -64,7 +103,20 @@ MSSQL_ENTRA_USERNAME=your_email@domain.com
 MSSQL_ENTRA_PASSWORD=your_password  # Optional, not recommended for security reasons
 ```
 
-You can also use a `.env` file to store these configuration values.
+For interactive authentication:
+
+```bash
+MSSQL_AUTH_TYPE=entra
+MSSQL_SERVER=your-server.database.windows.net
+MSSQL_DATABASE=your_database
+MSSQL_CLIENT_ID=your_app_client_id
+MSSQL_TENANT_ID=your_tenant_id
+MSSQL_AUTH_MODE=interactive  # Enables interactive auth
+MSSQL_TOKEN_CACHE_FILE=.mssql_token_cache.json  # Optional: Path to store token cache
+# MSSQL_USE_DEVICE_CODE=true  # Optional: Set to 'true' to use device code flow instead of browser-based auth
+```
+
+You can also use a `.env` file to store these configuration values as shown above.
 
 ## Usage
 
@@ -123,7 +175,7 @@ Add this to your `claude_desktop_config.json`:
 }
 ```
 
-#### Entra ID Authentication (User ID)
+#### Entra ID Authentication (Interactive)
 
 ```json
 {
@@ -142,13 +194,22 @@ Add this to your `claude_desktop_config.json`:
         "MSSQL_DATABASE": "your_database",
         "MSSQL_CLIENT_ID": "your_app_client_id",
         "MSSQL_TENANT_ID": "your_tenant_id",
-        "MSSQL_ENTRA_USERNAME": "your_email@domain.com"
-        // Note: Password should be handled securely, not in config
+        "MSSQL_AUTH_MODE": "interactive",
+        "MSSQL_TOKEN_CACHE_FILE": ".mssql_token_cache.json"
       }
     }
   }
 }
 ```
+
+### MCP Server Tools
+
+The MCP server provides several tools for interacting with SQL Server:
+
+1. **execute_sql**: Execute SQL queries against the active server
+2. **list_servers**: List all configured server connections
+3. **switch_server**: Switch between different server configurations
+4. **refresh_auth**: Refresh authentication tokens for Entra ID
 
 ### As a standalone server
 
