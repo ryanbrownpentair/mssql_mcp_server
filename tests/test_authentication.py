@@ -24,6 +24,16 @@ def mock_env_sql_auth():
         yield
 
 @pytest.fixture
+def mock_env_windows_auth():
+    """Set environment variables for Windows authentication"""
+    with mock.patch.dict(os.environ, {
+        "MSSQL_AUTH_TYPE": "windows",
+        "MSSQL_SERVER": "test-server",
+        "MSSQL_DATABASE": "test-db"
+    }):
+        yield
+
+@pytest.fixture
 def mock_env_entra_auth():
     """Set environment variables for Entra ID authentication"""
     with mock.patch.dict(os.environ, {
@@ -87,6 +97,13 @@ def test_get_db_config_sql_auth(mock_env_sql_auth):
     assert config["user"] == "test-user"
     assert config["password"] == "test-password"
     assert "auth_type" not in config
+
+def test_get_db_config_windows_auth(mock_env_windows_auth):
+    """Test get_db_config with Windows authentication"""
+    config = get_db_config()
+    assert config["server"] == "test-server"
+    assert config["database"] == "test-db"
+    assert config["auth_type"] == "windows"
 
 def test_get_db_config_entra_auth(mock_env_entra_auth):
     """Test get_db_config with Entra ID authentication"""
@@ -243,6 +260,28 @@ async def test_create_connection_sql(mock_connect):
         password="test-password",
         database="test-db"
     )
+
+@pytest.mark.asyncio
+@mock.patch("pymssql.connect")
+async def test_create_connection_windows(mock_connect):
+    """Test creating connection with Windows authentication"""
+    mock_connect.return_value = "test-connection"
+    
+    config = {
+        "auth_type": "windows",
+        "server": "test-server",
+        "database": "test-db"
+    }
+    
+    connection = create_connection(config)
+    
+    # Verify pymssql.connect was called with correct parameters
+    mock_connect.assert_called_once()
+    args, kwargs = mock_connect.call_args
+    assert kwargs["server"] == "test-server"
+    assert kwargs["database"] == "test-db"
+    assert "trusted_connection" in kwargs
+    assert kwargs["trusted_connection"] == "yes"
 
 @pytest.mark.asyncio
 @mock.patch("mssql_mcp_server.server.msal.ConfidentialClientApplication")

@@ -25,10 +25,9 @@ logger = logging.getLogger("mssql_mcp_server")
 def get_db_config():
     """Get database configuration from environment variables.
     
-    Supports both SQL authentication and Entra ID authentication.
-    For Entra ID, it can use either service principal (client_secret) or user credentials.
+    Supports SQL authentication, Windows authentication, and Entra ID authentication.
     """
-    # Get authentication type (SQL or Entra)
+    # Get authentication type (SQL, Windows, or Entra)
     auth_type = os.getenv("MSSQL_AUTH_TYPE", "sql").lower()
     
     config = {
@@ -50,6 +49,11 @@ def get_db_config():
         if not all([config["user"], config["password"]]):
             logger.error("SQL authentication requires both MSSQL_USER and MSSQL_PASSWORD")
             raise ValueError("Missing SQL authentication credentials")
+    
+    elif auth_type == "windows":
+        # Windows authentication
+        config["auth_type"] = "windows"
+        logger.info("Using Windows authentication")
             
     elif auth_type == "entra":
         # Entra ID authentication
@@ -78,7 +82,7 @@ def get_db_config():
             logger.error("Entra authentication requires either a username or client_secret")
             raise ValueError("Missing Entra ID credentials")
     else:
-        logger.error(f"Unknown authentication type: {auth_type}. Use 'sql' or 'entra'.")
+        logger.error(f"Unknown authentication type: {auth_type}. Use 'sql', 'windows', or 'entra'.")
         raise ValueError(f"Unknown authentication type: {auth_type}")
     
     return config
@@ -251,7 +255,7 @@ def get_entra_token(config):
 def create_connection(config):
     """Create a database connection based on the provided configuration.
     
-    Supports both SQL authentication and Entra ID authentication.
+    Supports SQL authentication, Windows authentication, and Entra ID authentication.
     
     Args:
         config: Dictionary containing connection parameters
@@ -278,8 +282,16 @@ def create_connection(config):
                 # Additional connection properties
                 conn_properties="Authentication=ActiveDirectoryServicePrincipal"
             )
+        elif config.get("auth_type") == "windows":
+            # Windows authentication (integrated security)
+            logger.info(f"Connecting to {config['server']} using Windows authentication")
+            conn = pymssql.connect(
+                server=config["server"],
+                database=config["database"],
+                trusted_connection="yes"  # This enables Windows authentication
+            )
         else:
-            # Regular SQL authentication (existing method)
+            # Regular SQL authentication
             conn = pymssql.connect(
                 server=config["server"],
                 user=config["user"],
