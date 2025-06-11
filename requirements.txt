@@ -1,4 +1,0 @@
-mcp>=1.0.0
-pymssql>=2.2.7
-msal>=1.20.0  # Microsoft Authentication Library
-python-dotenv>=1.0.0  # For .env file support
