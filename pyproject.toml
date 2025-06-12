@@ -11,6 +11,7 @@ dependencies = [
     "python-dotenv>=1.0.0",  # For .env file support
 ]
 
+# 既存のoptional-dependenciesはそのまま残しておきます（互換性のため）
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
@@ -20,6 +21,17 @@ dev = [
     "isort>=5.12.0",
     "mypy>=1.0.0",
 ]
+
+# uvの依存関係を追加
+# [tool.uv."dev-dependencies"] 
+# dev = [
+#     "pytest>=7.0.0",
+#     "pytest-asyncio>=0.23.0",
+#     "pytest-cov>=4.1.0",
+#     "black>=23.0.0",
+#     "isort>=5.12.0",
+#     "mypy>=1.0.0",
+# ]
 
 [tool.mcp]
 system_dependencies.darwin = ["freetds"]

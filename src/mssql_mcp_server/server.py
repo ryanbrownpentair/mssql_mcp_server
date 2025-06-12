@@ -282,7 +282,7 @@ def create_connection(config):
                 # Additional connection properties
                 conn_properties="Authentication=ActiveDirectoryServicePrincipal"
             )
-        elif config.get("auth_type") == "windows":
+        elif config.get("auth_type", "").lower() == "windows":
             # Windows authentication (integrated security)
             logger.info(f"Connecting to {config['server']} using Windows authentication")
             conn = pymssql.connect(

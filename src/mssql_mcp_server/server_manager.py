@@ -50,7 +50,7 @@ class ServerManager:
         # Try to read the .env file directly
         env_path = os.path.join(os.getcwd(), '.env')
         if os.path.exists(env_path):
-            with open(env_path, 'r') as f:
+            with open(env_path, 'r', encoding='utf-8') as f:
                 config.read_string('[global]\n' + f.read())
         
         # Get default server if specified
