@@ -93,6 +93,10 @@ class ServerManager:
                     logger.warning(f"Skipping server configuration '{section}': Missing SQL credentials")
                     continue
                     
+            elif auth_type == "windows":
+                # No additional validation needed for Windows authentication
+                logger.info(f"Windows authentication configured for server '{section}'")
+                
             elif auth_type == "entra":
                 server_config["client_id"] = os.getenv(f"{prefix}MSSQL_CLIENT_ID", 
                                                       config.get(section, "MSSQL_CLIENT_ID", fallback=None))

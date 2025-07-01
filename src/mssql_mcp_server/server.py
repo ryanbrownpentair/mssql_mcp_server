@@ -53,7 +53,7 @@ def get_db_config():
     elif auth_type == "windows":
         # Windows authentication
         config["auth_type"] = "windows"
-        logger.info("Using Windows authentication")
+        logger.info(f"Using Windows authentication for server {config['server']}")
             
     elif auth_type == "entra":
         # Entra ID authentication
@@ -267,7 +267,10 @@ def create_connection(config):
         Exception: If connection fails
     """
     try:
-        if config.get("auth_type") == "entra":
+        # 認証タイプを小文字に変換して比較（大文字小文字の違いを無視）
+        auth_type = config.get("auth_type", "").lower()
+        
+        if auth_type == "entra":
             # Entra ID authentication
             token = get_entra_token(config)
             
@@ -282,13 +285,13 @@ def create_connection(config):
                 # Additional connection properties
                 conn_properties="Authentication=ActiveDirectoryServicePrincipal"
             )
-        elif config.get("auth_type", "").lower() == "windows":
+        elif auth_type == "windows":
             # Windows authentication (integrated security)
-            logger.info(f"Connecting to {config['server']} using Windows authentication")
+            logger.info(f"Connecting to {config['server']}/{config['database']} using Windows authentication")
             conn = pymssql.connect(
                 server=config["server"],
                 database=config["database"],
-                trusted_connection="yes"  # This enables Windows authentication
+                windows_authentication=True  # PyMSSQLでのWindows認証の正しいパラメーター
             )
         else:
             # Regular SQL authentication
@@ -634,7 +637,9 @@ async def main():
         
         # Log authentication type
         config = server.config
-        if config.get("auth_type") == "entra":
+        auth_type = config.get("auth_type", "").lower()
+        
+        if auth_type == "entra":
             if config.get("auth_mode") == "interactive":
                 auth_method = "Entra ID (Interactive)"
                 auth_details = f"using client ID {config['client_id']}"
@@ -648,9 +653,13 @@ async def main():
             else:
                 auth_method = "Entra ID (Username/Password)"
                 auth_details = f"as user {config.get('username', 'unknown')}"
+        elif auth_type == "windows":
+            auth_method = "Windows Authentication"
+            auth_details = f"on server {config['server']}/{config['database']}"
         else:
+            # SQL Authentication
             auth_method = "SQL Authentication"
-            auth_details = f"as {config['user']}"
+            auth_details = f"as user {config.get('user', 'unknown')}"
         
         logger.info(f"Authentication: {auth_method} {auth_details}")
         
