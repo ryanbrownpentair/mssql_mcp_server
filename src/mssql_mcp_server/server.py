@@ -252,13 +252,15 @@ def get_entra_token(config):
     logger.info("Successfully acquired Entra ID token")
     return result["access_token"]
 
-def create_connection(config):
+def create_connection(config, timeout=30, debug=False):
     """Create a database connection based on the provided configuration.
     
     Supports SQL authentication, Windows authentication, and Entra ID authentication.
     
     Args:
         config: Dictionary containing connection parameters
+        timeout: Connection timeout in seconds (default: 30)
+        debug: Enable verbose debugging output
         
     Returns:
         pymssql.Connection: Database connection
@@ -266,46 +268,71 @@ def create_connection(config):
     Raises:
         Exception: If connection fails
     """
+    if debug:
+        logger.info(f"Connection attempt to {config['server']}/{config['database']} with timeout={timeout}s")
+        logger.info(f"Connection parameters: {config}")
+    
     try:
         # Convert authentication type to lowercase for case-insensitive comparison
         auth_type = config.get("auth_type", "").lower()
         
+        # Add connection timeout to all connection types
+        connection_kwargs = {
+            "server": config["server"],
+            "database": config["database"],
+            "timeout": timeout,
+            "login_timeout": timeout
+        }
+        
+        if debug:
+            logger.info(f"Using authentication type: {auth_type}")
+        
         if auth_type == "entra":
             # Entra ID authentication
             token = get_entra_token(config)
+            if debug:
+                logger.info("Entra ID token acquired successfully")
             
             # Note: pymssql might not directly support Entra token authentication
             # In a production environment, you might need to use pyodbc or another driver
             # This is a simplified implementation that might need adjustments
-            conn = pymssql.connect(
-                server=config["server"],
-                database=config["database"],
-                user=config.get("username", ""),  # For UserID authentication
-                password=token,  # Use token as password
-                # Additional connection properties
-                conn_properties="Authentication=ActiveDirectoryServicePrincipal"
-            )
+            connection_kwargs.update({
+                "user": config.get("username", ""),  # For UserID authentication
+                "password": token,  # Use token as password
+                "conn_properties": "Authentication=ActiveDirectoryServicePrincipal"
+            })
+            
         elif auth_type == "windows":
             # Windows authentication (integrated security)
             # For Windows authentication in PyMSSQL, simply omit username and password
             # https://pymssql.readthedocs.io/en/stable/pymssql_examples.html#connecting-using-windows-authentication
             logger.info(f"Connecting to {config['server']}/{config['database']} using Windows authentication")
-            conn = pymssql.connect(
-                server=config["server"],
-                database=config["database"]
-                # Windows authentication is used when username and password are not specified
-            )
+            # No additional parameters needed for Windows auth
+            
         else:
             # Regular SQL authentication
-            conn = pymssql.connect(
-                server=config["server"],
-                user=config["user"],
-                password=config["password"],
-                database=config["database"]
-            )
+            connection_kwargs.update({
+                "user": config["user"],
+                "password": config["password"]
+            })
+        
+        if debug:
+            logger.info(f"Attempting connection with parameters: {connection_kwargs}")
+            
+        conn = pymssql.connect(**connection_kwargs)
+        
+        if debug:
+            logger.info(f"Connection to {config['server']}/{config['database']} established successfully")
+            
         return conn
     except Exception as e:
-        logger.error(f"Database connection error: {str(e)}")
+        error_msg = f"Database connection error: {str(e)}"
+        logger.error(error_msg)
+        if debug:
+            logger.error(f"Connection parameters: server={config['server']}, database={config['database']}, auth_type={config.get('auth_type', 'sql')}")
+            # Log full exception details in debug mode
+            import traceback
+            logger.error(f"Full exception: {traceback.format_exc()}")
         raise
 
 # Initialize server
@@ -432,6 +459,23 @@ async def list_tools() -> list[Tool]:
                     }
                 },
                 "required": ["query"]
+            }
+        ),
+        Tool(
+            name="debug_connection",
+            description="Debug the database connection with detailed diagnostics",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Optional SQL query to execute as part of the test"
+                    },
+                    "server": {
+                        "type": "string",
+                        "description": "The server name to debug (optional, uses active server if not specified)"
+                    }
+                }
             }
         ),
         Tool(
@@ -586,40 +630,246 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not config:
             return [TextContent(type="text", text="Error: No active server configuration available")]
     
+        # Log the query before execution for better tracking
+        query_type = "SELECT" if query.strip().upper().startswith("SELECT") else "UPDATE/INSERT/DELETE/OTHER"
+        logger.info(f"Executing {query_type} query on server {config['server']}/{config['database']}: {query[:100]}{'...' if len(query) > 100 else ''}")
+        
+        start_time = time.time()
         try:
             conn = create_connection(config)
+            logger.info(f"Connection established to {config['server']}/{config['database']}, executing query...")
+            
             cursor = conn.cursor()
             cursor.execute(query)
+            logger.info(f"Query executed successfully on {config['server']}/{config['database']}")
             
             # Special handling for table listing
             if query.strip().upper().startswith("SELECT") and "INFORMATION_SCHEMA.TABLES" in query.upper():
                 tables = cursor.fetchall()
+                logger.info(f"Retrieved {len(tables)} tables from INFORMATION_SCHEMA")
                 result = ["Tables_in_" + config["database"]]  # Header
                 result.extend([table[0] for table in tables])
                 cursor.close()
                 conn.close()
+                execution_time = round(time.time() - start_time, 2)
+                logger.info(f"Query completed in {execution_time} seconds")
                 return [TextContent(type="text", text="\n".join(result))]
             
             # Regular SELECT queries
             elif query.strip().upper().startswith("SELECT"):
                 columns = [desc[0] for desc in cursor.description]
                 rows = cursor.fetchall()
+                logger.info(f"Retrieved {len(rows)} rows from {config['server']}/{config['database']}")
                 result = [",".join(map(str, row)) for row in rows]
                 cursor.close()
                 conn.close()
+                execution_time = round(time.time() - start_time, 2)
+                logger.info(f"Query completed in {execution_time} seconds")
                 return [TextContent(type="text", text="\n".join([",".join(columns)] + result))]
             
             # Non-SELECT queries
             else:
                 conn.commit()
                 affected_rows = cursor.rowcount
+                logger.info(f"Non-SELECT query affected {affected_rows} rows in {config['server']}/{config['database']}")
                 cursor.close()
                 conn.close()
+                execution_time = round(time.time() - start_time, 2)
+                logger.info(f"Query completed in {execution_time} seconds")
                 return [TextContent(type="text", text=f"Query executed successfully. Rows affected: {affected_rows}")]
                     
         except Exception as e:
-            logger.error(f"Error executing SQL '{query}': {e}")
+            execution_time = round(time.time() - start_time, 2)
+            logger.error(f"Error executing SQL on {config.get('server', 'unknown')}/{config.get('database', 'unknown')} after {execution_time} seconds: {str(e)}")
+            logger.error(f"Failed query: {query}")
             return [TextContent(type="text", text=f"Error executing query: {str(e)}")]
+    # Handle connection debugging
+    elif name == "debug_connection":
+        import socket
+        import traceback
+        from contextlib import contextmanager
+        
+        # Define time measurement context manager
+        @contextmanager
+        def measure_time(description):
+            """処理時間を計測するコンテキストマネージャー"""
+            start_time = time.time()
+            yield
+            elapsed_time = time.time() - start_time
+            logger.info(f"{description}: {elapsed_time:.2f}秒")
+        
+        # Determine which server to use
+        server_name = arguments.get("server")
+        if server_name:
+            if not server_manager.set_active_server(server_name):
+                available = ", ".join([s.name for s in server_manager.get_server_list()])
+                return [TextContent(
+                    type="text", 
+                    text=f"Error: Unknown server '{server_name}'. Available servers: {available}"
+                )]
+                
+        # Get active server configuration
+        config = server_manager.get_active_config()
+        if not config:
+            return [TextContent(type="text", text="Error: No active server configuration available")]
+        
+        # Set debug flag
+        detailed = True
+        
+        # Get custom query if provided
+        custom_query = arguments.get("query")
+        
+        # Start diagnostic results collection
+        result = []
+        result.append("=== SQL Server接続デバッグツール ===")
+        
+        # ステップ1: ネットワーク接続テスト
+        result.append("\nステップ1: ネットワーク接続のテスト...")
+        server = config["server"]
+        port = 1433  # SQL Serverの標準ポート
+        
+        try:
+            with measure_time("ネットワーク接続"):
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)  # 5秒のタイムアウト
+                connect_result = sock.connect_ex((server, port))
+                sock.close()
+                
+            if connect_result == 0:
+                result.append(f"✓ ネットワーク接続成功: {server}:{port}に接続できました")
+                network_success = True
+            else:
+                result.append(f"✗ ネットワーク接続失敗: {server}:{port}に接続できません（エラーコード: {connect_result}）")
+                result.append("  - ファイアウォールの設定を確認してください")
+                result.append("  - サーバー名が正しいか確認してください")
+                result.append("  - SQLサーバーが実行中か確認してください")
+                network_success = False
+        except socket.gaierror:
+            result.append(f"✗ ネットワーク接続失敗: ホスト名'{server}'の解決ができません")
+            result.append("  - サーバー名のスペルが正しいか確認してください")
+            result.append("  - DNSの設定を確認してください")
+            network_success = False
+        except Exception as e:
+            result.append(f"✗ ネットワーク接続テスト中にエラーが発生しました: {str(e)}")
+            network_success = False
+        
+        if not network_success:
+            return [TextContent(type="text", text="\n".join(result))]
+        
+        # ステップ2: SQL Server接続テスト
+        result.append("\nステップ2: SQL Server接続のテスト...")
+        
+        # 基本的な接続パラメータ
+        connection_params = {
+            "server": config["server"],
+            "database": config["database"],
+            "login_timeout": 30,
+            "timeout": 30
+        }
+        
+        # 認証タイプに応じてパラメータを追加
+        auth_type = config.get("auth_type", "sql").lower()
+        
+        if auth_type == "sql":
+            connection_params["user"] = config["user"]
+            connection_params["password"] = config["password"]
+            auth_info = "SQL認証"
+        elif auth_type == "windows":
+            auth_info = "Windows認証"
+        elif auth_type == "entra":
+            auth_info = "Entra ID認証"
+        else:
+            auth_info = "不明な認証方式"
+        
+        # 接続パラメータのログ出力（機密情報はマスク）
+        safe_params = connection_params.copy()
+        if "password" in safe_params:
+            safe_params["password"] = "******"
+        result.append(f"接続パラメータ: {safe_params}")
+        result.append(f"認証タイプ: {auth_info}")
+        
+        try:
+            with measure_time("SQL Server接続"):
+                conn = create_connection(config, debug=True)
+            result.append(f"✓ SQL Server接続成功: {config['server']}/{config['database']}に接続できました")
+            connection_success = True
+        except Exception as e:
+            result.append(f"✗ SQL Server接続失敗: {str(e)}")
+            if detailed:
+                result.append("詳細なエラー情報:")
+                result.append(traceback.format_exc())
+            
+            # エラーの種類に応じたヒントを表示
+            error_str = str(e).lower()
+            if "timeout" in error_str:
+                result.append("  - ネットワークのタイムアウトが発生しました")
+                result.append("  - ファイアウォールの設定を確認してください")
+                result.append("  - タイムアウト時間を長くしてみてください")
+            elif "login failed" in error_str:
+                result.append("  - ユーザー名またはパスワードが間違っています")
+                result.append("  - SQLユーザーがこのデータベースにアクセス権限を持っているか確認してください")
+            elif "database" in error_str and "not exist" in error_str:
+                result.append("  - 指定されたデータベースが存在しません")
+            elif "network" in error_str or "connection" in error_str:
+                result.append("  - ネットワーク接続に問題があります")
+                result.append("  - サーバー名が正しいか確認してください")
+                result.append("  - SQL Serverが実行中か確認してください")
+            connection_success = False
+        
+        if not connection_success:
+            return [TextContent(type="text", text="\n".join(result))]
+        
+        # ステップ3: テストクエリの実行
+        result.append("\nステップ3: テストクエリの実行...")
+        
+        try:
+            with measure_time("クエリ実行"):
+                cursor = conn.cursor()
+                
+                # カスタムクエリの実行またはバージョン情報のクエリ
+                if custom_query:
+                    result.append(f"カスタムクエリを実行: {custom_query}")
+                    cursor.execute(custom_query)
+                else:
+                    cursor.execute("SELECT @@VERSION")
+                
+                rows = cursor.fetchall()
+                cursor.close()
+            
+            if custom_query:
+                result.append(f"✓ カスタムクエリ実行成功:")
+                if cursor.description:
+                    columns = [desc[0] for desc in cursor.description]
+                    result.append(",".join(columns))
+                    for row in rows[:10]:  # 最大10行まで表示
+                        result.append(",".join(map(str, row)))
+                    if len(rows) > 10:
+                        result.append(f"... 他 {len(rows) - 10} 行")
+            else:
+                result.append(f"✓ クエリ実行成功:")
+                result.append(f"  - SQL Serverバージョン: {rows[0][0][:100]}...")
+            
+            query_success = True
+        except Exception as e:
+            result.append(f"✗ クエリ実行失敗: {str(e)}")
+            result.append(traceback.format_exc())
+            query_success = False
+        
+        # 接続を閉じる
+        try:
+            conn.close()
+            result.append("SQL Server接続を正常に閉じました")
+        except:
+            pass
+        
+        # 最終結果
+        if query_success:
+            result.append("\n✓ すべてのテストが成功しました！SQL Server接続は正常に動作しています。")
+        else:
+            result.append("\n✗ テストに失敗しました。上記のエラーメッセージを確認してください。")
+        
+        return [TextContent(type="text", text="\n".join(result))]
+        
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
