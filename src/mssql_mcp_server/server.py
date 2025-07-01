@@ -267,7 +267,7 @@ def create_connection(config):
         Exception: If connection fails
     """
     try:
-        # 認証タイプを小文字に変換して比較（大文字小文字の違いを無視）
+        # Convert authentication type to lowercase for case-insensitive comparison
         auth_type = config.get("auth_type", "").lower()
         
         if auth_type == "entra":
@@ -287,11 +287,13 @@ def create_connection(config):
             )
         elif auth_type == "windows":
             # Windows authentication (integrated security)
+            # For Windows authentication in PyMSSQL, simply omit username and password
+            # https://pymssql.readthedocs.io/en/stable/pymssql_examples.html#connecting-using-windows-authentication
             logger.info(f"Connecting to {config['server']}/{config['database']} using Windows authentication")
             conn = pymssql.connect(
                 server=config["server"],
-                database=config["database"],
-                windows_authentication=True  # PyMSSQLでのWindows認証の正しいパラメーター
+                database=config["database"]
+                # Windows authentication is used when username and password are not specified
             )
         else:
             # Regular SQL authentication

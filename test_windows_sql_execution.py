@@ -4,76 +4,76 @@ import os
 import sys
 from dotenv import load_dotenv
 
-# ロギング設定
+# Logging configuration
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger("test_windows_sql_execution")
 
-# プロジェクトのルートディレクトリをPythonパスに追加
+# Add project root directory to Python path
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
-# 環境変数を.envファイルから読み込む
+# Load environment variables from .env file
 load_dotenv()
 
 from mssql_mcp_server.server_manager import get_server_manager
 from mssql_mcp_server.server import call_tool
 
 async def test_execute_sql_on_windows_servers():
-    """WindowsサーバーでのツールによるSQL実行テスト"""
-    logger.info("WindowsサーバーでのSQL実行テストを開始します...")
+    """Test SQL execution on Windows servers using tools"""
+    logger.info("Starting SQL execution test on Windows servers...")
     
-    # サーバーマネージャーを初期化
+    # Initialize server manager
     server_manager = get_server_manager()
     
-    # テスト対象のサーバー
+    # Target servers for testing
     windows_servers = [
         "USCHITDB63-PTODS",
         "USCHITDB63-WQSDW"
     ]
     
-    # 各サーバーでSQLクエリを実行
+    # Execute SQL queries on each server
     for server_name in windows_servers:
-        logger.info(f"サーバー {server_name} でSQL実行テストを行います...")
+        logger.info(f"Running SQL execution test on server {server_name}...")
         
-        # テストケース: サーバー切り替え
+        # Test case: Switch server
         result = await call_tool("switch_server", {"server": server_name})
         if result and result[0].text and "Switched to server" in result[0].text:
-            logger.info(f"サーバー {server_name} に切り替えました")
+            logger.info(f"Successfully switched to server {server_name}")
         else:
-            logger.error(f"サーバー {server_name} への切り替えに失敗しました")
+            logger.error(f"Failed to switch to server {server_name}")
             continue
         
-        # テストケース: テーブル一覧取得
+        # Test case: Get table list
         try:
             result = await call_tool("execute_sql", {
                 "query": "SELECT TOP 5 TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'"
             })
             
             if result and result[0].text:
-                logger.info(f"サーバー {server_name} のテーブル一覧クエリの結果:")
+                logger.info(f"Table list query results for server {server_name}:")
                 logger.info(result[0].text)
             else:
-                logger.error(f"サーバー {server_name} のテーブル一覧取得に失敗しました")
+                logger.error(f"Failed to retrieve table list for server {server_name}")
         except Exception as e:
-            logger.error(f"テーブル一覧クエリの実行中にエラーが発生しました: {str(e)}")
+            logger.error(f"Error executing table list query: {str(e)}")
         
-        # テストケース: データベースバージョン取得
+        # Test case: Get database version
         try:
             result = await call_tool("execute_sql", {
                 "query": "SELECT @@VERSION AS version"
             })
             
             if result and result[0].text:
-                logger.info(f"サーバー {server_name} のバージョン情報:")
+                logger.info(f"Version information for server {server_name}:")
                 logger.info(result[0].text)
             else:
-                logger.error(f"サーバー {server_name} のバージョン情報取得に失敗しました")
+                logger.error(f"Failed to retrieve version information for server {server_name}")
         except Exception as e:
-            logger.error(f"バージョンクエリの実行中にエラーが発生しました: {str(e)}")
+            logger.error(f"Error executing version query: {str(e)}")
     
-    logger.info("WindowsサーバーでのSQL実行テストが完了しました")
+    logger.info("SQL execution test on Windows servers completed")
 
 if __name__ == "__main__":
     asyncio.run(test_execute_sql_on_windows_servers())
