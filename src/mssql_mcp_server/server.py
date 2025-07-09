@@ -737,7 +737,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 result.append(f"Rows affected: {affected_rows}")
                 result.append("")
                 result.append(f"-- Execution time: {execution_time} seconds")
-                return [TextContent(type="text", text="\n".join(result))
+                return [TextContent(type="text", text="\n".join(result))]
     except Exception as e:
         execution_time = round(time.time() - start_time, 2)
         logger.error(f"Error executing SQL on {config.get('server', 'unknown')}/{config.get('database', 'unknown')} after {execution_time} seconds: {str(e)}")
