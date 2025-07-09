@@ -4,7 +4,7 @@ import os
 import json
 import webbrowser
 import time
-import pymssql
+import pyodbc  # pymssqlからpyodbcに変更
 import msal  # For Microsoft Authentication
 from dotenv import load_dotenv  # For .env file support
 from mcp.server import Server
@@ -263,7 +263,7 @@ def create_connection(config, timeout=30, debug=False):
         debug: Enable verbose debugging output
         
     Returns:
-        pymssql.Connection: Database connection
+        pyodbc.Connection: Database connection
         
     Raises:
         Exception: If connection fails
@@ -276,13 +276,19 @@ def create_connection(config, timeout=30, debug=False):
         # Convert authentication type to lowercase for case-insensitive comparison
         auth_type = config.get("auth_type", "").lower()
         
-        # Add connection timeout to all connection types
-        connection_kwargs = {
-            "server": config["server"],
-            "database": config["database"],
-            "timeout": timeout,
-            "login_timeout": timeout
-        }
+        # 基本接続文字列パーツを構築
+        conn_str_parts = [
+            f"DRIVER={{ODBC Driver 17 for SQL Server}}",  # 最新のSQLサーバードライバー
+            f"SERVER={config['server']}",
+            f"DATABASE={config['database']}",
+            f"Timeout={timeout}",
+            f"Connection Timeout={timeout}"
+        ]
+        
+        # 暗号化設定
+        encryption = config.get("encryption", os.getenv("ENCRYPTION"))
+        if encryption:
+            conn_str_parts.append(f"Encryption={encryption}")
         
         if debug:
             logger.info(f"Using authentication type: {auth_type}")
@@ -293,33 +299,41 @@ def create_connection(config, timeout=30, debug=False):
             if debug:
                 logger.info("Entra ID token acquired successfully")
             
-            # Note: pymssql might not directly support Entra token authentication
-            # In a production environment, you might need to use pyodbc or another driver
-            # This is a simplified implementation that might need adjustments
-            connection_kwargs.update({
-                "user": config.get("username", ""),  # For UserID authentication
-                "password": token,  # Use token as password
-                "conn_properties": "Authentication=ActiveDirectoryServicePrincipal"
-            })
+            # Entra ID認証の種類に応じて適切な認証方法を設定
+            if config.get("client_secret"):
+                conn_str_parts.append("Authentication=ActiveDirectoryServicePrincipal")
+                conn_str_parts.append(f"UID={config.get('username', '')}")
+            elif config.get("auth_mode") == "interactive":
+                conn_str_parts.append("Authentication=ActiveDirectoryInteractive")
+                if config.get("username"):
+                    conn_str_parts.append(f"UID={config['username']}")
+            else:
+                conn_str_parts.append("Authentication=ActiveDirectoryPassword")
+                conn_str_parts.append(f"UID={config['username']}")
+            
+            # トークンをパスワードとして使用
+            conn_str_parts.append(f"PWD={token}")
             
         elif auth_type == "windows":
-            # Windows authentication (integrated security)
-            # For Windows authentication in PyMSSQL, simply omit username and password
-            # https://pymssql.readthedocs.io/en/stable/pymssql_examples.html#connecting-using-windows-authentication
+            # Windows認証
+            conn_str_parts.append("Trusted_Connection=yes")
             logger.info(f"Connecting to {config['server']}/{config['database']} using Windows authentication")
-            # No additional parameters needed for Windows auth
             
         else:
-            # Regular SQL authentication
-            connection_kwargs.update({
-                "user": config["user"],
-                "password": config["password"]
-            })
+            # 通常のSQL認証
+            conn_str_parts.append(f"UID={config['user']}")
+            conn_str_parts.append(f"PWD={config['password']}")
+        
+        # 接続文字列を構築
+        conn_str = ';'.join(conn_str_parts)
         
         if debug:
-            logger.info(f"Attempting connection with parameters: {connection_kwargs}")
+            # 安全のためにパスワードをマスク
+            debug_conn_str = conn_str.replace(config.get('password', ''), '******') if 'password' in config else conn_str
+            debug_conn_str = debug_conn_str.replace(token, '******') if 'token' in locals() else debug_conn_str
+            logger.info(f"Attempting connection with connection string: {debug_conn_str}")
             
-        conn = pymssql.connect(**connection_kwargs)
+        conn = pyodbc.connect(conn_str)
         
         if debug:
             logger.info(f"Connection to {config['server']}/{config['database']} established successfully")
@@ -428,6 +442,7 @@ async def read_resource(uri: AnyUrl) -> str:
             cursor.execute(f"SELECT TOP 100 * FROM {table}")
             columns = [desc[0] for desc in cursor.description]
             rows = cursor.fetchall()
+            # pyodbcはタプルではなくpyodbc.Rowを返すので、必要に応じて変換
             result = [",".join(map(str, row)) for row in rows]
             cursor.close()
             conn.close()
@@ -660,6 +675,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 columns = [desc[0] for desc in cursor.description]
                 rows = cursor.fetchall()
                 logger.info(f"Retrieved {len(rows)} rows from {config['server']}/{config['database']}")
+                # pyodbcの行データを文字列に変換
                 result = [",".join(map(str, row)) for row in rows]
                 cursor.close()
                 conn.close()
@@ -759,33 +775,36 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # ステップ2: SQL Server接続テスト
         result.append("\nステップ2: SQL Server接続のテスト...")
         
-        # 基本的な接続パラメータ
-        connection_params = {
-            "server": config["server"],
-            "database": config["database"],
-            "login_timeout": 30,
-            "timeout": 30
-        }
+        # pyodbcに適した接続文字列パーツを構築
+        conn_str_parts = [
+            f"DRIVER={{ODBC Driver 17 for SQL Server}}",
+            f"SERVER={config['server']}",
+            f"DATABASE={config['database']}",
+            f"Connection Timeout={30}"
+        ]
         
         # 認証タイプに応じてパラメータを追加
         auth_type = config.get("auth_type", "sql").lower()
         
         if auth_type == "sql":
-            connection_params["user"] = config["user"]
-            connection_params["password"] = config["password"]
+            conn_str_parts.append(f"UID={config['user']}")
+            conn_str_parts.append(f"PWD={config['password']}")
             auth_info = "SQL認証"
         elif auth_type == "windows":
+            conn_str_parts.append("Trusted_Connection=yes")
             auth_info = "Windows認証"
         elif auth_type == "entra":
             auth_info = "Entra ID認証"
+            # Entra ID認証の詳細は後で処理
         else:
             auth_info = "不明な認証方式"
         
-        # 接続パラメータのログ出力（機密情報はマスク）
-        safe_params = connection_params.copy()
-        if "password" in safe_params:
-            safe_params["password"] = "******"
-        result.append(f"接続パラメータ: {safe_params}")
+        # 安全な接続文字列をログに記録
+        safe_conn_str = ';'.join(conn_str_parts)
+        if auth_type == "sql":
+            safe_conn_str = safe_conn_str.replace(config['password'], '******')
+        
+        result.append(f"接続パラメータ: {safe_conn_str}")
         result.append(f"認証タイプ: {auth_info}")
         
         try:

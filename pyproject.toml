@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
     "mcp>=1.0.0",
     "msal>=1.32.3",
-    "pymssql>=2.2.8",
+    "pyodbc>=4.0.39",  # pymssqlからpyodbcに変更
     "python-dotenv>=1.0.0",  # For .env file support
 ]
 
