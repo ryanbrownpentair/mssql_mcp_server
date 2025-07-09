@@ -282,7 +282,8 @@ def create_connection(config, timeout=30, debug=False):
             f"SERVER={config['server']}",
             f"DATABASE={config['database']}",
             f"Timeout={timeout}",
-            f"Connection Timeout={timeout}"
+            f"Connection Timeout={timeout}",
+            f"Query Timeout={timeout}"  # クエリ実行タイムアウトを追加
         ]
         
         # 暗号化設定
@@ -471,6 +472,10 @@ async def list_tools() -> list[Tool]:
                     "server": {
                         "type": "string",
                         "description": "The server name to execute the query on (optional, uses active server if not specified)"
+                    },
+                    "max_rows": {
+                        "type": "integer",
+                        "description": "Maximum number of rows to return (default: 100)"
                     }
                 },
                 "required": ["query"]
@@ -645,6 +650,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not config:
             return [TextContent(type="text", text="Error: No active server configuration available")]
     
+        # Get max_rows parameter with default value of 100
+        max_rows = int(arguments.get("max_rows", 100))
+        
         # Log the query before execution for better tracking
         query_type = "SELECT" if query.strip().upper().startswith("SELECT") else "UPDATE/INSERT/DELETE/OTHER"
         logger.info(f"Executing {query_type} query on server {config['server']}/{config['database']}: {query[:100]}{'...' if len(query) > 100 else ''}")
@@ -658,30 +666,60 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             cursor.execute(query)
             logger.info(f"Query executed successfully on {config['server']}/{config['database']}")
             
+            # 結果セットのメタデータ
+            result_meta = []
+            result_meta.append(f"-- Server: {config['server']}")
+            result_meta.append(f"-- Database: {config['database']}")
+            result_meta.append(f"-- Query type: {query_type}")
+            
             # Special handling for table listing
             if query.strip().upper().startswith("SELECT") and "INFORMATION_SCHEMA.TABLES" in query.upper():
                 tables = cursor.fetchall()
                 logger.info(f"Retrieved {len(tables)} tables from INFORMATION_SCHEMA")
-                result = ["Tables_in_" + config["database"]]  # Header
+                result = result_meta.copy()
+                result.append("")
+                result.append("Tables_in_" + config["database"])  # Header
                 result.extend([table[0] for table in tables])
                 cursor.close()
                 conn.close()
                 execution_time = round(time.time() - start_time, 2)
                 logger.info(f"Query completed in {execution_time} seconds")
+                result.append("")
+                result.append(f"-- Execution time: {execution_time} seconds")
+                result.append(f"-- Row count: {len(tables)}")
                 return [TextContent(type="text", text="\n".join(result))]
             
             # Regular SELECT queries
             elif query.strip().upper().startswith("SELECT"):
                 columns = [desc[0] for desc in cursor.description]
                 rows = cursor.fetchall()
-                logger.info(f"Retrieved {len(rows)} rows from {config['server']}/{config['database']}")
+                total_rows = len(rows)
+                logger.info(f"Retrieved {total_rows} rows from {config['server']}/{config['database']}")
+                
+                # 結果の制限
+                displayed_rows = rows[:max_rows]
+                
                 # pyodbcの行データを文字列に変換
-                result = [",".join(map(str, row)) for row in rows]
+                result = result_meta.copy()
+                result.append("")
+                result.append(",".join(columns))
+                for row in displayed_rows:
+                    result.append(",".join(map(lambda x: str(x).replace(',', '\\,') if x is not None else 'NULL', row)))
+                
                 cursor.close()
                 conn.close()
                 execution_time = round(time.time() - start_time, 2)
                 logger.info(f"Query completed in {execution_time} seconds")
-                return [TextContent(type="text", text="\n".join([",".join(columns)] + result))]
+                
+                # 結果セットが制限された場合の情報を追加
+                if total_rows > max_rows:
+                    result.append("")
+                    result.append(f"-- Note: Showing {max_rows} of {total_rows} total rows")
+                
+                result.append("")
+                result.append(f"-- Execution time: {execution_time} seconds")
+                result.append(f"-- Row count: {total_rows}")
+                return [TextContent(type="text", text="\n".join(result))]
             
             # Non-SELECT queries
             else:
@@ -692,13 +730,28 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 conn.close()
                 execution_time = round(time.time() - start_time, 2)
                 logger.info(f"Query completed in {execution_time} seconds")
-                return [TextContent(type="text", text=f"Query executed successfully. Rows affected: {affected_rows}")]
-                    
-        except Exception as e:
-            execution_time = round(time.time() - start_time, 2)
-            logger.error(f"Error executing SQL on {config.get('server', 'unknown')}/{config.get('database', 'unknown')} after {execution_time} seconds: {str(e)}")
-            logger.error(f"Failed query: {query}")
-            return [TextContent(type="text", text=f"Error executing query: {str(e)}")]
+                
+                result = result_meta.copy()
+                result.append("")
+                result.append(f"Query executed successfully.")
+                result.append(f"Rows affected: {affected_rows}")
+                result.append("")
+                result.append(f"-- Execution time: {execution_time} seconds")
+                return [TextContent(type="text", text="\n".join(result))
+    except Exception as e:
+        execution_time = round(time.time() - start_time, 2)
+        logger.error(f"Error executing SQL on {config.get('server', 'unknown')}/{config.get('database', 'unknown')} after {execution_time} seconds: {str(e)}")
+        logger.error(f"Failed query: {query}")
+        
+        # エラー情報を追加
+        error_message = [
+            f"Error executing query after {execution_time} seconds:",
+            str(e),
+            "",
+            "Query:",
+            query
+        ]
+        return [TextContent(type="text", text="\n".join(error_message))]
     # Handle connection debugging
     elif name == "debug_connection":
         import socket
