@@ -658,6 +658,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         logger.info(f"Executing {query_type} query on server {config['server']}/{config['database']}: {query[:100]}{'...' if len(query) > 100 else ''}")
         
         start_time = time.time()
+        
         try:
             conn = create_connection(config)
             logger.info(f"Connection established to {config['server']}/{config['database']}, executing query...")
@@ -738,25 +739,27 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 result.append("")
                 result.append(f"-- Execution time: {execution_time} seconds")
                 return [TextContent(type="text", text="\n".join(result))]
-    except Exception as e:
-        execution_time = round(time.time() - start_time, 2)
-        logger.error(f"Error executing SQL on {config.get('server', 'unknown')}/{config.get('database', 'unknown')} after {execution_time} seconds: {str(e)}")
-        logger.error(f"Failed query: {query}")
         
-        # エラー情報を追加
-        error_message = [
-            f"Error executing query after {execution_time} seconds:",
-            str(e),
-            "",
-            "Query:",
-            query
-        ]
-        return [TextContent(type="text", text="\n".join(error_message))]
+        except Exception as e:
+            execution_time = round(time.time() - start_time, 2)
+            logger.error(f"Error executing SQL on {config.get('server', 'unknown')}/{config.get('database', 'unknown')} after {execution_time} seconds: {str(e)}")
+            logger.error(f"Failed query: {query}")
+            
+            # エラー情報を追加
+            error_message = [
+                f"Error executing query after {execution_time} seconds:",
+                str(e),
+                "",
+                "Query:",
+                query
+            ]
+            return [TextContent(type="text", text="\n".join(error_message))]
     # Handle connection debugging
     elif name == "debug_connection":
         import socket
         import traceback
         from contextlib import contextmanager
+        from pathlib import Path
         
         # Define time measurement context manager
         @contextmanager
@@ -767,6 +770,95 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             elapsed_time = time.time() - start_time
             logger.info(f"{description}: {elapsed_time:.2f}秒")
         
+        # 環境設定ファイルから特定のセクションの設定を読み込む関数
+        def load_env_config(section=None):
+            """環境設定ファイルから設定を読み込む"""
+            # デフォルトサーバーを取得
+            default_server = os.getenv("MSSQL_DEFAULT_SERVER")
+            if section is None:
+                section = default_server
+                logger.info(f"デフォルトサーバーを使用します: {section}")
+            
+            # 指定されたセクションの設定を読み込む
+            env_path = Path('.env')
+            if not env_path.exists():
+                logger.error("エラー: .env ファイルが見つかりません")
+                return {}
+                
+            try:
+                with open(env_path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+            except UnicodeDecodeError:
+                # UTF-8でダメな場合はLatin-1で試みる
+                with open(env_path, 'r', encoding='latin-1') as f:
+                    lines = f.readlines()
+            
+            in_section = False
+            config = {}
+            
+            for line in lines:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                    
+                if line.startswith('[') and line.endswith(']'):
+                    current_section = line[1:-1]
+                    in_section = (current_section == section)
+                    continue
+                    
+                if in_section and '=' in line:
+                    key, value = line.split('=', 1)
+                    config[key.strip()] = value.strip()
+            
+            return config
+        
+        # .envファイルの設定を使って接続テストを行う関数
+        def test_connection(config):
+            """設定を使用してデータベース接続をテスト"""
+            auth_type = config.get('MSSQL_AUTH_TYPE', '').lower()
+            server = config.get('MSSQL_SERVER', '')
+            database = config.get('MSSQL_DATABASE', '')
+            encryption = config.get('ENCRYPTION', 'yes')
+            
+            if not server or not database:
+                logger.error("エラー: サーバーまたはデータベースが設定されていません")
+                return False
+            
+            try:
+                conn_str = []
+                conn_str.append(f"DRIVER={{ODBC Driver 17 for SQL Server}}")
+                conn_str.append(f"SERVER={server}")
+                conn_str.append(f"DATABASE={database}")
+                
+                if auth_type == 'windows':
+                    conn_str.append("Trusted_Connection=yes")
+                elif auth_type == 'sql':
+                    user = config.get('MSSQL_USER', '')
+                    password = config.get('MSSQL_PASSWORD', '')
+                    conn_str.append(f"UID={user}")
+                    conn_str.append(f"PWD={password}")
+                
+                if encryption.lower() == 'optional':
+                    conn_str.append("Encryption=Optional")
+                
+                conn_string = ';'.join(conn_str)
+                safe_conn_string = conn_string
+                if auth_type == 'sql':
+                    safe_conn_string = safe_conn_string.replace(password, '******')
+                logger.info(f"接続文字列: {safe_conn_string}")
+                
+                conn = pyodbc.connect(conn_string)
+                cursor = conn.cursor()
+                cursor.execute("SELECT @@VERSION")
+                row = cursor.fetchone()
+                logger.info(f"接続成功: SQL Server バージョン: {row[0]}")
+                cursor.close()
+                conn.close()
+                return True
+            except Exception as e:
+                logger.error(f"接続エラー: {str(e)}")
+                return False
+        
         # Determine which server to use
         server_name = arguments.get("server")
         if server_name:
@@ -774,15 +866,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 available = ", ".join([s.name for s in server_manager.get_server_list()])
                 return [TextContent(
                     type="text", 
-                    text=f"Error: Unknown server '{server_name}'. Available servers: {available}"
+                    text=f"エラー: 不明なサーバー '{server_name}'。利用可能なサーバー: {available}"
                 )]
                 
         # Get active server configuration
         config = server_manager.get_active_config()
         if not config:
-            return [TextContent(type="text", text="Error: No active server configuration available")]
+            return [TextContent(type="text", text="エラー: アクティブなサーバー設定がありません")]
         
-        # Set debug flag
+        # 詳細出力を有効化
         detailed = True
         
         # Get custom query if provided
@@ -791,6 +883,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # Start diagnostic results collection
         result = []
         result.append("=== SQL Server接続デバッグツール ===")
+        
+        # 設定情報を表示
+        result.append(f"\nサーバー: {config['server']}")
+        result.append(f"データベース: {config['database']}")
+        result.append(f"認証タイプ: {config.get('auth_type', 'sql')}")
+        
+        # 利用可能なODBCドライバーを表示
+        result.append(f"利用可能なODBCドライバー: {', '.join(pyodbc.drivers())}")
         
         # ステップ1: ネットワーク接続テスト
         result.append("\nステップ1: ネットワーク接続のテスト...")
@@ -836,6 +936,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             f"Connection Timeout={30}"
         ]
         
+        # 暗号化設定
+        encryption = config.get("encryption", os.getenv("ENCRYPTION"))
+        if encryption:
+            conn_str_parts.append(f"Encryption={encryption}")
+        
         # 認証タイプに応じてパラメータを追加
         auth_type = config.get("auth_type", "sql").lower()
         
@@ -855,7 +960,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # 安全な接続文字列をログに記録
         safe_conn_str = ';'.join(conn_str_parts)
         if auth_type == "sql":
-            safe_conn_str = safe_conn_str.replace(config['password'], '******')
+            safe_conn_str = safe_conn_str.replace(config.get('password', ''), '******')
         
         result.append(f"接続パラメータ: {safe_conn_str}")
         result.append(f"認証タイプ: {auth_info}")
@@ -882,6 +987,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 result.append("  - SQLユーザーがこのデータベースにアクセス権限を持っているか確認してください")
             elif "database" in error_str and "not exist" in error_str:
                 result.append("  - 指定されたデータベースが存在しません")
+            elif "driver" in error_str:
+                result.append("  - 指定されたODBCドライバーが見つかりません")
+                result.append(f"  - 利用可能なドライバー: {', '.join(pyodbc.drivers())}")
             elif "network" in error_str or "connection" in error_str:
                 result.append("  - ネットワーク接続に問題があります")
                 result.append("  - サーバー名が正しいか確認してください")
@@ -939,6 +1047,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result.append("\n✓ すべてのテストが成功しました！SQL Server接続は正常に動作しています。")
         else:
             result.append("\n✗ テストに失敗しました。上記のエラーメッセージを確認してください。")
+        
+        # 環境設定からの接続テスト
+        try:
+            env_config = load_env_config()
+            if env_config:
+                result.append("\n=== 環境設定からの接続テスト ===")
+                test_success = test_connection(env_config)
+                if test_success:
+                    result.append("✓ 環境設定からの接続も成功しました！")
+                else:
+                    result.append("✗ 環境設定からの接続テストに失敗しました。")
+        except Exception as e:
+            result.append(f"\n環境設定のロード中にエラーが発生しました: {str(e)}")
         
         return [TextContent(type="text", text="\n".join(result))]
         
