@@ -178,37 +178,35 @@ def get_entra_token(config):
             if result and "access_token" in result:
                 logger.info("Successfully acquired token from cache")
                 return result["access_token"]
-        
-        # If device code flow is requested
-        if config.get("use_device_code", False):
+
+        use_device_code = str(config.get("use_device_code", "false")).lower() == "true"
+
+        if use_device_code:
+            # For interactive auth, use device code flow to avoid redirect URI issues
             logger.info("Starting device code flow authentication")
             # Device code flow (useful for environments without browsers)
             flow = app.initiate_device_flow(scopes=scopes)
+
             if "user_code" not in flow:
                 error = flow.get("error", "Unknown error")
                 error_desc = flow.get("error_description", "No description")
                 logger.error(f"Failed to initiate device code flow: {error} - {error_desc}")
                 raise ValueError(f"Failed to initiate device code flow: {error}")
-            
+
             # Display instructions to the user
-            print("\n" + "-" * 60)
-            print("MICROSOFT ENTRA ID AUTHENTICATION REQUIRED")
-            print("-" * 60)
-            print(f"To sign in, use a web browser to open the page {flow['verification_uri']}")
-            print(f"and enter the code {flow['user_code']} to authenticate.")
-            print("-" * 60 + "\n")
-            
+            logger.info("\n" + "-" * 60)
+            logger.info("MICROSOFT ENTRA ID AUTHENTICATION REQUIRED")
+            logger.info("-" * 60)
+            logger.info(f"To sign in, use a web browser to open the page {flow['verification_uri']}")
+            logger.info(f"and enter the code {flow['user_code']} to authenticate.")
+            logger.info("-" * 60 + "\n")
+
             # Wait for user to complete the flow
             result = app.acquire_token_by_device_flow(flow)
         else:
-            # Standard interactive authentication with browser
             logger.info("Starting interactive browser authentication")
-            # Use the systems default browser for authentication
-            result = app.acquire_token_interactive(
-                scopes=scopes,
-                prompt="select_account"  # Force account selection even if only one account exists
-            )
-    
+            result = app.acquire_token_interactive(scopes=scopes)
+
     elif "client_secret" in config and config["client_secret"]:
         # Application authentication (service principal)
         app = msal.ConfidentialClientApplication(

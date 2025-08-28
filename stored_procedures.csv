@@ -1,0 +1,12 @@
+schema_name,name,description,type_desc,create_date,modify_date
+dbo,sp_GetNumberOfDaysRecordList,"Get Days Late Record List",SQL_STORED_PROCEDURE,2012-10-02,2012-10-02
+dbo,sp_GetSalesOrganizationRecordList,"Get Sales organization details",SQL_STORED_PROCEDURE,2012-10-02,2012-10-02
+dbo,sp_InsertF0902,"Insert records from F0902_Temp to F0902",SQL_STORED_PROCEDURE,2015-01-30,2016-05-02
+dbo,sp_InsertF0902_20160502,"Insert records from F0902_Temp to F0902 (backup)",SQL_STORED_PROCEDURE,2016-05-02,2016-05-02
+dbo,sp_InsertF0911,"Insert records from F0911_Temp to F0911",SQL_STORED_PROCEDURE,2014-08-26,2014-08-26
+dbo,sp_InsertF32942,"Insert records from F32942_Temp to F32942",SQL_STORED_PROCEDURE,2015-02-04,2015-02-04
+dbo,sp_InsertF4111,"Insert records from F4111_Temp to F4111_Current",SQL_STORED_PROCEDURE,2014-12-04,2019-03-28
+dbo,sp_UpdateNumberOfDays,"Update Number Of Days details",SQL_STORED_PROCEDURE,2012-10-02,2012-10-02
+dbo,sp_UpdateSalesOrganization,"Update Sales organization details",SQL_STORED_PROCEDURE,2012-10-02,2012-11-15
+dbo,sp_ValidateNumberOfDaysEntered,"Check number of days already entered or not",SQL_STORED_PROCEDURE,2012-10-02,2012-10-02
+dbo,sp_ValidateSalesOrganizationKes,"Check Parent sales rep id + sales id + territory already entered or not",SQL_STORED_PROCEDURE,2012-10-02,2012-10-02

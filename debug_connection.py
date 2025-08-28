@@ -33,7 +33,7 @@ def parse_args():
     parser.add_argument('--user', help='SQLユーザー名（デフォルト: MSSQL_USER環境変数、Windows認証の場合は不要）')
     parser.add_argument('--password', help='SQLパスワード（デフォルト: MSSQL_PASSWORD環境変数、Windows認証の場合は不要）')
     parser.add_argument('--timeout', type=int, help='接続タイムアウト（秒）（デフォルト: 30秒）')
-    parser.add_argument('--auth', choices=['sql', 'windows'], help='認証タイプ（sql/windows）（デフォルト: MSSQL_AUTH_TYPE環境変数または sql）')
+    parser.add_argument('--auth', choices=['sql', 'windows', 'entra'], help='認証タイプ（sql/windows/entra）（デフォルト: MSSQL_AUTH_TYPE環境変数または sql）')
     parser.add_argument('--debug', action='store_true', help='詳細なデバッグ情報を出力')
     parser.add_argument('--env-file', help='.envファイルのパス（デフォルト: カレントディレクトリの.env）')
     parser.add_argument('--driver', help='ODBCドライバー名（デフォルト: MSSQL_DRIVER環境変数または "ODBC Driver 17 for SQL Server"）')
@@ -159,6 +159,12 @@ def create_test_connection(config, detailed=False):
         conn_str_parts.append(f"UID={config['user']}")
         conn_str_parts.append(f"PWD={config['password']}")
         auth_type = "SQL認証"
+    elif config["auth"] == "windows":
+        conn_str_parts.append("Trusted_Connection=yes")
+        auth_type = "Windows認証"
+    elif config["auth"] == "entra":
+        conn_str_parts.append("Authentication=ActiveDirectoryInteractive")
+        auth_type = "Entra ID"
     else:
         conn_str_parts.append("Trusted_Connection=yes")
         auth_type = "Windows認証"
@@ -267,101 +273,165 @@ def load_env_config(section=None):
     
     return config
 
-def test_connection(config):
+def load_all_env_configs():
+    """環境設定ファイルからすべてのサーバー設定を読み込む"""
+    load_dotenv()
+    
+    env_path = Path('.env')
+    if not env_path.exists():
+        logger.error("エラー: .env ファイルが見つかりません")
+        return {}
+        
+    try:
+        with open(env_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+    except UnicodeDecodeError:
+        with open(env_path, 'r', encoding='latin-1') as f:
+            lines = f.readlines()
+    
+    configs = {}
+    current_section = None
+    
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+            
+        if line.startswith('[') and line.endswith(']'):
+            current_section = line[1:-1]
+            if current_section != 'default': # 'default'セクションは無視
+                configs[current_section] = {}
+            continue
+            
+        if current_section and current_section != 'default' and '=' in line:
+            key, value = line.split('=', 1)
+            configs[current_section][key.strip()] = value.strip()
+            
+    # MSSQL_SERVER を持たないセクションを除外
+    final_configs = {
+        section: config for section, config in configs.items() 
+        if 'MSSQL_SERVER' in config
+    }
+
+    return final_configs
+
+def test_connection(server_name, config):
     """設定を使用してデータベース接続をテスト"""
+    logger.info(f"--- {server_name} の接続テスト開始 ---")
     auth_type = config.get('MSSQL_AUTH_TYPE', '').lower()
     server = config.get('MSSQL_SERVER', '')
     database = config.get('MSSQL_DATABASE', '')
-    encryption = config.get('ENCRYPTION', 'yes')
+    driver = config.get('MSSQL_DRIVER', 'ODBC Driver 18 for SQL Server')
+    encryption = config.get('ENCRYPTION', 'yes') # デフォルトで暗号化を試みる
     
     if not server or not database:
         logger.error("エラー: サーバーまたはデータベースが設定されていません")
         return False
     
     try:
-        conn_str = []
-        conn_str.append(f"DRIVER={{ODBC Driver 17 for SQL Server}}")
-        conn_str.append(f"SERVER={server}")
-        conn_str.append(f"DATABASE={database}")
+        conn_str_parts = [
+            f"DRIVER={{{driver}}}",
+            f"SERVER={server}",
+            f"DATABASE={database}",
+            f"Encrypt={encryption}"
+        ]
         
         if auth_type == 'windows':
-            conn_str.append("Trusted_Connection=yes")
+            conn_str_parts.append("Trusted_Connection=yes")
+            logger.info("認証タイプ: Windows認証")
         elif auth_type == 'sql':
             user = config.get('MSSQL_USER', '')
             password = config.get('MSSQL_PASSWORD', '')
-            conn_str.append(f"UID={user}")
-            conn_str.append(f"PWD={password}")
+            if not user or not password:
+                logger.error("✗ SQL認証にはユーザー名とパスワードが必要です")
+                return False
+            conn_str_parts.append(f"UID={user}")
+            conn_str_parts.append(f"PWD={password}")
+            logger.info("認証タイプ: SQL認証")
+        elif auth_type == 'entra':
+            auth_mode = config.get('MSSQL_AUTH_MODE', 'interactive').lower()
+            if auth_mode == 'interactive':
+                use_device_code = config.get('MSSQL_USE_DEVICE_CODE', 'false').lower() == 'true'
+                if use_device_code:
+                    conn_str_parts.append("Authentication=ActiveDirectoryDeviceCodeLogin")
+                    logger.info("認証タイプ: Entra ID (Device Code)")
+                else:
+                    conn_str_parts.append("Authentication=ActiveDirectoryInteractive")
+                    logger.info("認証タイプ: Entra ID (Interactive)")
+            else: # client_secret, etc.
+                # ここではインタラクティブなフローのみを実装
+                logger.warning(f"Entra ID の認証モード '{auth_mode}' は現在サポートされていません。")
+                return False
         
-        if encryption.lower() == 'optional':
-            conn_str.append("Encryption=Optional")
+        conn_string = ';'.join(conn_str_parts)
         
-        conn_string = ';'.join(conn_str)
-        logger.info(f"接続文字列: {conn_string}")
+        # パスワードをマスクして接続文字列をログに出力
+        safe_conn_str = conn_string
+        if auth_type == 'sql':
+            safe_conn_str = safe_conn_str.replace(config.get('MSSQL_PASSWORD', ''), '******')
+        logger.info(f"接続文字列: {safe_conn_str}")
         
-        conn = pyodbc.connect(conn_string)
+        with measure_time(f"{server_name} への接続"):
+            conn = pyodbc.connect(conn_string, timeout=15)
+
         cursor = conn.cursor()
         cursor.execute("SELECT @@VERSION")
         row = cursor.fetchone()
-        logger.info(f"接続成功: SQL Server バージョン: {row[0]}")
+        logger.info(f"✓ 接続成功: {server_name}")
+        logger.info(f"  SQL Server バージョン: {row[0].splitlines()[0]}")
         cursor.close()
         conn.close()
         return True
-    except Exception as e:
-        logger.error(f"接続エラー: {str(e)}")
+    except pyodbc.OperationalError as e:
+        if "Login timeout expired" in str(e):
+            logger.error(f"✗ 接続エラー ({server_name}): ログインタイムアウト")
+            logger.error("  - サーバーが応答しません。サーバーが起動しているか、ネットワーク経路を確認してください。")
+        elif "Cannot open server" in str(e):
+            logger.error(f"✗ 接続エラー ({server_name}): サーバーに接続できません")
+            logger.error("  - ファイアウォールがポート1433をブロックしている可能性があります。")
+        else:
+            logger.error(f"✗ 接続エラー ({server_name}): {str(e).splitlines()[0]}")
         return False
+    except Exception as e:
+        logger.error(f"✗ 予期せぬエラー ({server_name}): {str(e).splitlines()[0]}")
+        return False
+    finally:
+        logger.info(f"--- {server_name} の接続テスト終了 ---\n")
 
 def main():
     """メイン実行関数"""
-    args = parse_args()
-    
+    parser = argparse.ArgumentParser(description='SQL Server接続のデバッグツール')
+    parser.add_argument('server_name', nargs='?', default=None, 
+                        help='テストするサーバー名（.envファイルのセクション名）。指定しない場合はすべてのサーバーをテストします。')
+    parser.add_argument('--debug', action='store_true', help='詳細なデバッグ情報を出力')
+    args = parser.parse_args()
+
     if args.debug:
         logger.setLevel(logging.DEBUG)
-    
-    logger.info("=== SQL Server接続デバッグツール ===")
-    
-    # 設定の整理
-    config = get_config_from_env_and_args(args)
-    
-    # 設定情報を表示
-    logger.info(f"サーバー: {config['server']}")
-    logger.info(f"データベース: {config['database']}")
-    logger.info(f"認証タイプ: {config['auth']}")
-    logger.info(f"ドライバー: {config['driver']}")
-    logger.info(f"タイムアウト設定: {config['timeout']}秒")
-    
-    # 利用可能なODBCドライバーを表示（デバッグモード時）
-    if args.debug:
-        logger.debug(f"利用可能なODBCドライバー: {', '.join(pyodbc.drivers())}")
-    
-    # ステップ1: ネットワーク接続テスト
-    if not check_network_connection(config['server']):
-        return
-    
-    # ステップ2: SQL Server接続テスト
-    conn = create_test_connection(config, detailed=args.debug)
-    if not conn:
-        return
-    
-    # ステップ3: テストクエリ実行
-    success = execute_test_query(conn)
-    
-    # 接続を閉じる
-    try:
-        conn.close()
-        logger.info("SQL Server接続を正常に閉じました")
-    except:
-        pass
-    
-    # 最終結果
-    if success:
-        logger.info("✓ すべてのテストが成功しました！SQL Server接続は正常に動作しています。")
-    else:
-        logger.error("✗ テストに失敗しました。上記のエラーメッセージを確認してください。")
 
-    # 環境設定からの接続テスト
-    env_config = load_env_config()
-    logger.info("=== 環境設定からの接続テスト ===")
-    test_connection(env_config)
+    logger.info("=== SQL Server一括接続デバッグツール ===")
+    
+    all_configs = load_all_env_configs()
+    if not all_configs:
+        logger.warning(".envファイルにサーバー設定が見つかりませんでした。")
+        return
+
+    if args.server_name:
+        if args.server_name in all_configs:
+            test_connection(args.server_name, all_configs[args.server_name])
+        else:
+            logger.error(f"エラー: サーバー '{args.server_name}' の設定が.envファイルに見つかりません。")
+            logger.info(f"利用可能なサーバー: {', '.join(all_configs.keys())}")
+    else:
+        logger.info(".envファイル内のすべてのサーバーの接続をテストします...")
+        results = {}
+        for name, config in all_configs.items():
+            results[name] = test_connection(name, config)
+        
+        logger.info("=== 全サーバーのテスト結果概要 ===")
+        for name, success in results.items():
+            status = "✓ 成功" if success else "✗ 失敗"
+            logger.info(f"- {name}: {status}")
 
 if __name__ == "__main__":
     main()
