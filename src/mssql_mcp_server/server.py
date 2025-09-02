@@ -361,8 +361,17 @@ def create_connection(config, timeout=30, debug=False):
             logger.error(f"Full exception: {traceback.format_exc()}")
         raise
 
+class MssqlMcpServer(Server):
+    """Custom server to handle additional notification types."""
+
+    @property
+    def _receive_notification_type(self) -> Type[BaseModel]:
+        return ClientNotification
+
+
 # Initialize server
-app = Server("mssql_mcp_server", client_notification_type=ClientNotification)
+app = MssqlMcpServer("mssql_mcp_server")
+
 
 @app.list_resources()
 async def list_resources() -> list[Resource]:
