@@ -17,7 +17,7 @@ from mcp.types import (
     RootsListChangedNotification,
 )
 from pydantic import AnyUrl, BaseModel, Field
-from typing import Literal, Union
+from typing import Literal, Union, Type
 from .server_manager import get_server_manager
 
 # Load environment variables from .env file
