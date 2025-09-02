@@ -8,8 +8,16 @@ import pyodbc  # pymssqlからpyodbcに変更
 import msal  # For Microsoft Authentication
 from dotenv import load_dotenv  # For .env file support
 from mcp.server import Server
-from mcp.types import Resource, Tool, TextContent
-from pydantic import AnyUrl
+from mcp.types import (
+    Resource,
+    Tool,
+    TextContent,
+    ProgressNotification,
+    InitializedNotification,
+    RootsListChangedNotification,
+)
+from pydantic import AnyUrl, BaseModel, Field
+from typing import Literal, Union
 from .server_manager import get_server_manager
 
 # Load environment variables from .env file
@@ -21,6 +29,22 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger("mssql_mcp_server")
+
+# 新しい通知タイプを定義します
+class CancelledNotificationParams(BaseModel):
+    request_id: int = Field(..., alias="requestId")
+
+class CancelledNotification(BaseModel):
+    method: Literal["notifications/cancelled"]
+    params: CancelledNotificationParams
+
+# mcp.server.Server がデフォルトで知っている通知タイプに、新しいタイプを追加します
+ClientNotification = Union[
+    ProgressNotification,
+    InitializedNotification,
+    RootsListChangedNotification,
+    CancelledNotification,
+]
 
 def get_db_config():
     """Get database configuration from environment variables.
@@ -293,25 +317,16 @@ def create_connection(config, timeout=30, debug=False):
             logger.info(f"Using authentication type: {auth_type}")
         
         if auth_type == "entra":
-            # Entra ID authentication
-            token = get_entra_token(config)
+            # Entra ID認証
+            conn_str_parts.append("Authentication=ActiveDirectoryInteractive")
+            if config.get("user"):
+                conn_str_parts.append(f"UID={config['user']}")
+            
+            # Entra ID (Interactive) ではパスワードは不要
+            # ユーザーはプロンプトで資格情報を入力します
             if debug:
-                logger.info("Entra ID token acquired successfully")
-            
-            # Entra ID認証の種類に応じて適切な認証方法を設定
-            if config.get("client_secret"):
-                conn_str_parts.append("Authentication=ActiveDirectoryServicePrincipal")
-                conn_str_parts.append(f"UID={config.get('username', '')}")
-            elif config.get("auth_mode") == "interactive":
-                conn_str_parts.append("Authentication=ActiveDirectoryInteractive")
-                if config.get("username"):
-                    conn_str_parts.append(f"UID={config['username']}")
-            else:
-                conn_str_parts.append("Authentication=ActiveDirectoryPassword")
-                conn_str_parts.append(f"UID={config['username']}")
-            
-            # トークンをパスワードとして使用
-            conn_str_parts.append(f"PWD={token}")
+                logger.info("Configuring for Entra ID Interactive authentication. User will be prompted.")
+
             
         elif auth_type == "windows":
             # Windows認証
@@ -327,9 +342,7 @@ def create_connection(config, timeout=30, debug=False):
         conn_str = ';'.join(conn_str_parts)
         
         if debug:
-            # 安全のためにパスワードをマスク
             debug_conn_str = conn_str.replace(config.get('password', ''), '******') if 'password' in config else conn_str
-            debug_conn_str = debug_conn_str.replace(token, '******') if 'token' in locals() else debug_conn_str
             logger.info(f"Attempting connection with connection string: {debug_conn_str}")
             
         conn = pyodbc.connect(conn_str)
@@ -349,7 +362,7 @@ def create_connection(config, timeout=30, debug=False):
         raise
 
 # Initialize server
-app = Server("mssql_mcp_server")
+app = Server("mssql_mcp_server", client_notification_type=ClientNotification)
 
 @app.list_resources()
 async def list_resources() -> list[Resource]:
