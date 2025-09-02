@@ -738,6 +738,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 conn.commit()
                 affected_rows = cursor.rowcount
                 logger.info(f"Non-SELECT query affected {affected_rows} rows in {config['server']}/{config['database']}")
+
+                # Capture messages from the connection (e.g., PRINT statements)
+                messages = []
+                if hasattr(conn, 'messages') and conn.messages:
+                    for message in conn.messages:
+                        # The message format is typically [SQLSTATE] message (native_error)
+                        # We'll just extract the message part.
+                        msg_text = message[1]
+                        messages.append(msg_text)
+                        logger.info(f"Captured message from server: {msg_text}")
+
                 cursor.close()
                 conn.close()
                 execution_time = round(time.time() - start_time, 2)
@@ -747,6 +758,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 result.append("")
                 result.append(f"Query executed successfully.")
                 result.append(f"Rows affected: {affected_rows}")
+
+                if messages:
+                    result.append("\nServer Messages:")
+                    result.extend([f"- {msg}" for msg in messages])
+                
                 result.append("")
                 result.append(f"-- Execution time: {execution_time} seconds")
                 return [TextContent(type="text", text="\n".join(result))]
