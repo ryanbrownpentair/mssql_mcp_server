@@ -369,6 +369,10 @@ class MssqlMcpServer(Server):
         return ClientNotification
 
 
+# モンキーパッチを適用して、mcp.server.lowlevel.Server のプロパティを上書きします
+from mcp.server.lowlevel import Server as LowLevelServer
+LowLevelServer._receive_notification_type = property(lambda self: ClientNotification)
+
 # Initialize server
 app = MssqlMcpServer("mssql_mcp_server")
 
@@ -1101,6 +1105,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
+
+# カスタムサーバークラスを作成して継承ベースで拡張
+class ExtendedMcpServer(Server):
+    def __init__(self, name: str):
+        super().__init__(name)
+        # 通知ハンドラーを正式に登録
+        self._notification_handlers["notifications/cancelled"] = self._handle_cancelled
+    
+    async def _handle_cancelled(self, params: CancelledNotificationParams):
+        # キャンセル処理の実装
+        pass
 
 async def main():
     """Main entry point to run the MCP server."""
