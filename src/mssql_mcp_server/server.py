@@ -17,7 +17,7 @@ from mcp.types import (
     RootsListChangedNotification,
 )
 from pydantic import AnyUrl, BaseModel, Field
-from typing import Literal, Union, Type
+from typing import Literal, Union, Type, List, Dict, Any
 from .server_manager import get_server_manager
 
 # Load environment variables from .env file
@@ -30,21 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("mssql_mcp_server")
 
-# 新しい通知タイプを定義します
-class CancelledNotificationParams(BaseModel):
-    request_id: int = Field(..., alias="requestId")
-
-class CancelledNotification(BaseModel):
-    method: Literal["notifications/cancelled"]
-    params: CancelledNotificationParams
-
-# mcp.server.Server がデフォルトで知っている通知タイプに、新しいタイプを追加します
-ClientNotification = Union[
-    ProgressNotification,
-    InitializedNotification,
-    RootsListChangedNotification,
-    CancelledNotification,
-]
+logger = logging.getLogger("mssql_mcp_server")
 
 def get_db_config():
     """Get database configuration from environment variables.
@@ -298,14 +284,14 @@ def create_connection(config, timeout=30, debug=False):
         # Convert authentication type to lowercase for case-insensitive comparison
         auth_type = config.get("auth_type", "").lower()
         
-        # 基本接続文字列パーツを構築
+        # Build basic connection string parts
         conn_str_parts = [
-            f"DRIVER={{ODBC Driver 17 for SQL Server}}",  # 最新のSQLサーバードライバー
+            f"DRIVER={{ODBC Driver 17 for SQL Server}}",  # Latest SQL Server driver
             f"SERVER={config['server']}",
             f"DATABASE={config['database']}",
             f"Timeout={timeout}",
             f"Connection Timeout={timeout}",
-            f"Query Timeout={timeout}"  # クエリ実行タイムアウトを追加
+            f"Query Timeout={timeout}"  # Add query execution timeout
         ]
         
         # 暗号化設定
@@ -317,28 +303,28 @@ def create_connection(config, timeout=30, debug=False):
             logger.info(f"Using authentication type: {auth_type}")
         
         if auth_type == "entra":
-            # Entra ID認証
+            # Entra ID authentication
             conn_str_parts.append("Authentication=ActiveDirectoryInteractive")
             if config.get("user"):
                 conn_str_parts.append(f"UID={config['user']}")
             
-            # Entra ID (Interactive) ではパスワードは不要
-            # ユーザーはプロンプトで資格情報を入力します
+            # Entra ID (Interactive) does not require password
+            # User will be prompted for credentials
             if debug:
                 logger.info("Configuring for Entra ID Interactive authentication. User will be prompted.")
 
             
         elif auth_type == "windows":
-            # Windows認証
+            # Windows authentication
             conn_str_parts.append("Trusted_Connection=yes")
             logger.info(f"Connecting to {config['server']}/{config['database']} using Windows authentication")
             
         else:
-            # 通常のSQL認証
+            # Standard SQL authentication
             conn_str_parts.append(f"UID={config['user']}")
             conn_str_parts.append(f"PWD={config['password']}")
         
-        # 接続文字列を構築
+        # Build connection string
         conn_str = ';'.join(conn_str_parts)
         
         if debug:
@@ -361,20 +347,141 @@ def create_connection(config, timeout=30, debug=False):
             logger.error(f"Full exception: {traceback.format_exc()}")
         raise
 
-class MssqlMcpServer(Server):
-    """Custom server to handle additional notification types."""
-
-    @property
-    def _receive_notification_type(self) -> Type[BaseModel]:
-        return ClientNotification
+# Initialize MCP server with standard functionality
+app = Server("mssql_mcp_server")
 
 
-# モンキーパッチを適用して、mcp.server.lowlevel.Server のプロパティを上書きします
-from mcp.server.lowlevel import Server as LowLevelServer
-LowLevelServer._receive_notification_type = property(lambda self: ClientNotification)
-
-# Initialize server
-app = MssqlMcpServer("mssql_mcp_server")
+async def execute_multi_statement_query(query: str, max_rows: int = 100) -> List[Dict[str, Any]]:
+    """Execute multi-statement SQL query using nextset() to iterate through results."""
+    server_manager = get_server_manager()
+    
+    try:
+        # Get active server configuration and create connection
+        config = server_manager.get_active_config()
+        if not config:
+            raise Exception("No active server configuration available")
+            
+        logger.info(f"Starting multi-statement query execution on {config['server']}/{config['database']}")
+        # Count semicolons more accurately - exclude trailing semicolons from statement count
+        semicolon_count = query.strip().count(';')
+        # Determine actual statement count (trailing semicolons don't create empty statements)
+        statement_count = semicolon_count if not query.strip().endswith(';') else semicolon_count
+        logger.info(f"Query contains {semicolon_count} semicolons, estimated {statement_count + 1} statements")
+        
+        conn = create_connection(config)
+        cursor = conn.cursor()
+        
+        all_results = []
+        statement_index = 0
+        
+        logger.info(f"Executing multi-statement query batch...")
+        
+        # Clear any existing messages
+        if hasattr(conn, 'messages'):
+            conn.messages.clear()
+        
+        # Execute the query (may contain multiple statements)
+        cursor.execute(query)
+        
+        # Process first result set
+        logger.info(f"Processing statement {statement_index + 1}...")
+        current_result = {"statement_index": statement_index, "affected_rows": 0, "data": []}
+        
+        if cursor.description:
+            # This is a SELECT statement with results
+            columns = [desc[0] for desc in cursor.description]
+            rows = cursor.fetchmany(max_rows)
+            current_result["data"] = [dict(zip(columns, row)) for row in rows]
+            current_result["columns"] = columns
+            logger.info(f"Statement {statement_index + 1}: SELECT query returned {len(rows)} rows with columns: {', '.join(columns)}")
+        else:
+            # This is an INSERT/UPDATE/DELETE statement
+            current_result["affected_rows"] = cursor.rowcount
+            logger.info(f"Statement {statement_index + 1}: Non-SELECT query affected {cursor.rowcount} rows")
+        
+        all_results.append(current_result)
+        
+        # Process additional result sets using nextset()
+        statement_index = 1
+        while cursor.nextset():
+            logger.info(f"Processing statement {statement_index + 1}...")
+            current_result = {"statement_index": statement_index, "affected_rows": 0, "data": []}
+            
+            if cursor.description:
+                # This is a SELECT statement with results
+                columns = [desc[0] for desc in cursor.description]
+                rows = cursor.fetchmany(max_rows)
+                current_result["data"] = [dict(zip(columns, row)) for row in rows]
+                current_result["columns"] = columns
+                logger.info(f"Statement {statement_index + 1}: SELECT query returned {len(rows)} rows with columns: {', '.join(columns)}")
+            else:
+                # This is an INSERT/UPDATE/DELETE statement
+                current_result["affected_rows"] = cursor.rowcount
+                logger.info(f"Statement {statement_index + 1}: Non-SELECT query affected {cursor.rowcount} rows")
+            
+            all_results.append(current_result)
+            statement_index += 1
+        
+        # Capture any server messages (e.g., PRINT statements)
+        messages = []
+        try:
+            if hasattr(conn, 'messages') and conn.messages:
+                for message in conn.messages:
+                    # The message format varies, try to extract meaningful text
+                    if isinstance(message, (list, tuple)) and len(message) > 1:
+                        msg_text = str(message[1])  # Usually the second element contains the message
+                    else:
+                        msg_text = str(message)
+                    
+                    if msg_text and msg_text.strip():
+                        messages.append(msg_text.strip())
+                        logger.info(f"Server message captured: {msg_text.strip()}")
+        except Exception as e:
+            logger.warning(f"Error capturing server messages: {str(e)}")
+        
+        # Add messages to results - distribute across statements or add to last result
+        if messages:
+            if all_results:
+                all_results[-1]["messages"] = messages
+                logger.info(f"Total server messages captured: {len(messages)}")
+            
+            # Also log each message individually for debugging
+            for i, msg in enumerate(messages):
+                logger.info(f"Message {i + 1}: {msg}")
+        
+        # Commit if autocommit is off
+        if not conn.autocommit:
+            conn.commit()
+            logger.info("Transaction committed successfully")
+        
+        logger.info(f"Multi-statement query execution completed successfully. Processed {len(all_results)} statement(s)")
+        
+        # Log summary of results
+        for i, result in enumerate(all_results):
+            if result.get("data"):
+                logger.info(f"Statement {i + 1} summary: SELECT with {len(result['data'])} rows")
+            else:
+                logger.info(f"Statement {i + 1} summary: Non-SELECT with {result.get('affected_rows', 0)} affected rows")
+        
+        return all_results
+        
+    except pyodbc.Error as e:
+        error_msg = f"SQL execution error in multi-statement query: {str(e)}"
+        logger.error(error_msg)
+        logger.error(f"Failed multi-statement query: {query[:200]}{'...' if len(query) > 200 else ''}")
+        raise Exception(error_msg)
+    except Exception as e:
+        error_msg = f"Unexpected error in multi-statement query execution: {str(e)}"
+        logger.error(error_msg)
+        logger.error(f"Failed multi-statement query: {query[:200]}{'...' if len(query) > 200 else ''}")
+        raise Exception(error_msg)
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
+            logger.info("Database cursor closed")
+        if 'conn' in locals():
+            conn.close()
+            logger.info("Database connection closed")
 
 
 @app.list_resources()
@@ -688,14 +795,71 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             logger.info(f"Connection established to {config['server']}/{config['database']}, executing query...")
             
             cursor = conn.cursor()
-            cursor.execute(query)
-            logger.info(f"Query executed successfully on {config['server']}/{config['database']}")
             
             # 結果セットのメタデータ
             result_meta = []
             result_meta.append(f"-- Server: {config['server']}")
             result_meta.append(f"-- Database: {config['database']}")
-            result_meta.append(f"-- Query type: {query_type}")
+            result_meta.append(f"-- Query type: {'SELECT' if query.strip().upper().startswith('SELECT') else 'UPDATE/INSERT/DELETE/OTHER'}")
+            
+            # Check if query contains multiple statements (semicolon-separated)
+            is_multi_statement = ';' in query.strip() and query.strip().count(';') > (1 if query.strip().endswith(';') else 0)
+            
+            if is_multi_statement:
+                # Count semicolons more accurately for logging
+                semicolon_count = query.strip().count(';')
+                statement_count = semicolon_count if not query.strip().endswith(';') else semicolon_count
+                logger.info(f"Detected multi-statement query with {semicolon_count} semicolons, estimated {statement_count + 1} statements")
+                # Use the dedicated multi-statement function
+                try:
+                    cursor.close()
+                    conn.close()
+                    # Call our dedicated multi-statement handler
+                    results = await execute_multi_statement_query(query, max_rows)
+                    execution_time = round(time.time() - start_time, 2)
+                    
+                    # Format results for display
+                    result = result_meta.copy()
+                    result.append("")
+                    result.append(f"Multi-statement query executed with {len(results)} result sets:")
+                    result.append("")
+                    
+                    for i, res in enumerate(results):
+                        result.append(f"=== Statement {i + 1} ===")
+                        if 'data' in res and res['data']:
+                            # This is a SELECT statement
+                            if 'columns' in res:
+                                result.append(",".join(res['columns']))
+                                for row in res['data']:
+                                    result.append(",".join(str(v) if v is not None else 'NULL' for v in row.values()))
+                            result.append(f"Rows returned: {len(res['data'])}")
+                        else:
+                            # This is an INSERT/UPDATE/DELETE statement
+                            result.append(f"Rows affected: {res['affected_rows']}")
+                        
+                        # Add server messages if present
+                        if 'messages' in res and res['messages']:
+                            result.append("Server Messages:")
+                            for msg in res['messages']:
+                                result.append(f"  - {msg}")
+                        
+                        result.append("")
+                    
+                    # Check if there are any server messages across all results
+                    total_messages = sum(len(res.get('messages', [])) for res in results)
+                    if total_messages > 0:
+                        result.append(f"-- Total server messages: {total_messages}")
+                    
+                    result.append(f"-- Execution time: {execution_time} seconds")
+                    return [TextContent(type="text", text="\n".join(result))]
+                    
+                except Exception as e:
+                    logger.error(f"Multi-statement execution failed: {str(e)}")
+                    return [TextContent(type="text", text=f"Multi-statement execution failed: {str(e)}")]
+            
+            # Single statement execution (existing logic)
+            cursor.execute(query)
+            logger.info(f"Query executed successfully on {config['server']}/{config['database']}")
             
             # Special handling for table listing
             if query.strip().upper().startswith("SELECT") and "INFORMATION_SCHEMA.TABLES" in query.upper():
@@ -785,7 +949,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             logger.error(f"Error executing SQL on {config.get('server', 'unknown')}/{config.get('database', 'unknown')} after {execution_time} seconds: {str(e)}")
             logger.error(f"Failed query: {query}")
             
-            # エラー情報を追加
+            # Add error information
             error_message = [
                 f"Error executing query after {execution_time} seconds:",
                 str(e),
@@ -804,32 +968,32 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # Define time measurement context manager
         @contextmanager
         def measure_time(description):
-            """処理時間を計測するコンテキストマネージャー"""
+            """Context manager to measure processing time"""
             start_time = time.time()
             yield
             elapsed_time = time.time() - start_time
-            logger.info(f"{description}: {elapsed_time:.2f}秒")
+            logger.info(f"{description}: {elapsed_time:.2f}s")
         
-        # 環境設定ファイルから特定のセクションの設定を読み込む関数
+        # Function to load configuration from environment file for specific section
         def load_env_config(section=None):
-            """環境設定ファイルから設定を読み込む"""
-            # デフォルトサーバーを取得
+            """Load configuration from environment file"""
+            # Get default server
             default_server = os.getenv("MSSQL_DEFAULT_SERVER")
             if section is None:
                 section = default_server
-                logger.info(f"デフォルトサーバーを使用します: {section}")
+                logger.info(f"Using default server: {section}")
             
-            # 指定されたセクションの設定を読み込む
+            # Load settings for specified section
             env_path = Path('.env')
             if not env_path.exists():
-                logger.error("エラー: .env ファイルが見つかりません")
+                logger.error("Error: .env file not found")
                 return {}
                 
             try:
                 with open(env_path, 'r', encoding='utf-8') as f:
                     lines = f.readlines()
             except UnicodeDecodeError:
-                # UTF-8でダメな場合はLatin-1で試みる
+                # If UTF-8 fails, try Latin-1
                 with open(env_path, 'r', encoding='latin-1') as f:
                     lines = f.readlines()
             
@@ -852,16 +1016,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             
             return config
         
-        # .envファイルの設定を使って接続テストを行う関数
+        # Function to test connection using .env file settings
         def test_connection(config):
-            """設定を使用してデータベース接続をテスト"""
+            """Test database connection using configuration"""
             auth_type = config.get('MSSQL_AUTH_TYPE', '').lower()
             server = config.get('MSSQL_SERVER', '')
             database = config.get('MSSQL_DATABASE', '')
             encryption = config.get('ENCRYPTION', 'yes')
             
             if not server or not database:
-                logger.error("エラー: サーバーまたはデータベースが設定されていません")
+                logger.error("Error: Server or database not configured")
                 return False
             
             try:
@@ -885,18 +1049,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 safe_conn_string = conn_string
                 if auth_type == 'sql':
                     safe_conn_string = safe_conn_string.replace(password, '******')
-                logger.info(f"接続文字列: {safe_conn_string}")
+                logger.info(f"Connection string: {safe_conn_string}")
                 
                 conn = pyodbc.connect(conn_string)
                 cursor = conn.cursor()
                 cursor.execute("SELECT @@VERSION")
                 row = cursor.fetchone()
-                logger.info(f"接続成功: SQL Server バージョン: {row[0]}")
+                logger.info(f"Connection successful: SQL Server version: {row[0]}")
                 cursor.close()
                 conn.close()
                 return True
             except Exception as e:
-                logger.error(f"接続エラー: {str(e)}")
+                logger.error(f"Connection error: {str(e)}")
                 return False
         
         # Determine which server to use
@@ -906,15 +1070,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 available = ", ".join([s.name for s in server_manager.get_server_list()])
                 return [TextContent(
                     type="text", 
-                    text=f"エラー: 不明なサーバー '{server_name}'。利用可能なサーバー: {available}"
+                    text=f"Error: Unknown server '{server_name}'. Available servers: {available}"
                 )]
                 
         # Get active server configuration
         config = server_manager.get_active_config()
         if not config:
-            return [TextContent(type="text", text="エラー: アクティブなサーバー設定がありません")]
+            return [TextContent(type="text", text="Error: No active server configuration available")]
         
-        # 詳細出力を有効化
+        # Enable detailed output
         detailed = True
         
         # Get custom query if provided
@@ -922,53 +1086,53 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         
         # Start diagnostic results collection
         result = []
-        result.append("=== SQL Server接続デバッグツール ===")
+        result.append("=== SQL Server Connection Debug Tool ===")
         
-        # 設定情報を表示
-        result.append(f"\nサーバー: {config['server']}")
-        result.append(f"データベース: {config['database']}")
-        result.append(f"認証タイプ: {config.get('auth_type', 'sql')}")
+        # Display configuration information
+        result.append(f"\nServer: {config['server']}")
+        result.append(f"Database: {config['database']}")
+        result.append(f"Authentication Type: {config.get('auth_type', 'sql')}")
         
-        # 利用可能なODBCドライバーを表示
-        result.append(f"利用可能なODBCドライバー: {', '.join(pyodbc.drivers())}")
+        # Display available ODBC drivers
+        result.append(f"Available ODBC Drivers: {', '.join(pyodbc.drivers())}")
         
-        # ステップ1: ネットワーク接続テスト
-        result.append("\nステップ1: ネットワーク接続のテスト...")
+        # Step 1: Network connection test
+        result.append("\nStep 1: Testing network connection...")
         server = config["server"]
-        port = 1433  # SQL Serverの標準ポート
+        port = 1433  # Standard port for SQL Server
         
         try:
-            with measure_time("ネットワーク接続"):
+            with measure_time("Network connection"):
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5)  # 5秒のタイムアウト
+                sock.settimeout(5)  # 5 second timeout
                 connect_result = sock.connect_ex((server, port))
                 sock.close()
                 
             if connect_result == 0:
-                result.append(f"✓ ネットワーク接続成功: {server}:{port}に接続できました")
+                result.append(f"✓ Network connection successful: Connected to {server}:{port}")
                 network_success = True
             else:
-                result.append(f"✗ ネットワーク接続失敗: {server}:{port}に接続できません（エラーコード: {connect_result}）")
-                result.append("  - ファイアウォールの設定を確認してください")
-                result.append("  - サーバー名が正しいか確認してください")
-                result.append("  - SQLサーバーが実行中か確認してください")
+                result.append(f"✗ Network connection failed: Cannot connect to {server}:{port} (Error code: {connect_result})")
+                result.append("  - Check firewall settings")
+                result.append("  - Verify server name is correct")
+                result.append("  - Ensure SQL Server is running")
                 network_success = False
         except socket.gaierror:
-            result.append(f"✗ ネットワーク接続失敗: ホスト名'{server}'の解決ができません")
-            result.append("  - サーバー名のスペルが正しいか確認してください")
-            result.append("  - DNSの設定を確認してください")
+            result.append(f"✗ Network connection failed: Cannot resolve hostname '{server}'")
+            result.append("  - Check server name spelling")
+            result.append("  - Check DNS settings")
             network_success = False
         except Exception as e:
-            result.append(f"✗ ネットワーク接続テスト中にエラーが発生しました: {str(e)}")
+            result.append(f"✗ Error occurred during network connection test: {str(e)}")
             network_success = False
         
         if not network_success:
             return [TextContent(type="text", text="\n".join(result))]
         
-        # ステップ2: SQL Server接続テスト
-        result.append("\nステップ2: SQL Server接続のテスト...")
+        # Step 2: SQL Server connection test
+        result.append("\nStep 2: Testing SQL Server connection...")
         
-        # pyodbcに適した接続文字列パーツを構築
+        # Build connection string parts suitable for pyodbc
         conn_str_parts = [
             f"DRIVER={{ODBC Driver 17 for SQL Server}}",
             f"SERVER={config['server']}",
@@ -976,79 +1140,79 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             f"Connection Timeout={30}"
         ]
         
-        # 暗号化設定
+        # Encryption settings
         encryption = config.get("encryption", os.getenv("ENCRYPTION"))
         if encryption:
             conn_str_parts.append(f"Encryption={encryption}")
         
-        # 認証タイプに応じてパラメータを追加
+        # Add parameters based on authentication type
         auth_type = config.get("auth_type", "sql").lower()
         
         if auth_type == "sql":
             conn_str_parts.append(f"UID={config['user']}")
             conn_str_parts.append(f"PWD={config['password']}")
-            auth_info = "SQL認証"
+            auth_info = "SQL Authentication"
         elif auth_type == "windows":
             conn_str_parts.append("Trusted_Connection=yes")
-            auth_info = "Windows認証"
+            auth_info = "Windows Authentication"
         elif auth_type == "entra":
-            auth_info = "Entra ID認証"
-            # Entra ID認証の詳細は後で処理
+            auth_info = "Entra ID Authentication"
+            # Entra ID authentication details will be processed later
         else:
-            auth_info = "不明な認証方式"
+            auth_info = "Unknown authentication method"
         
-        # 安全な接続文字列をログに記録
+        # Record safe connection string in log
         safe_conn_str = ';'.join(conn_str_parts)
         if auth_type == "sql":
             safe_conn_str = safe_conn_str.replace(config.get('password', ''), '******')
         
-        result.append(f"接続パラメータ: {safe_conn_str}")
-        result.append(f"認証タイプ: {auth_info}")
+        result.append(f"Connection parameters: {safe_conn_str}")
+        result.append(f"Authentication type: {auth_info}")
         
         try:
-            with measure_time("SQL Server接続"):
+            with measure_time("SQL Server connection"):
                 conn = create_connection(config, debug=True)
-            result.append(f"✓ SQL Server接続成功: {config['server']}/{config['database']}に接続できました")
+            result.append(f"✓ SQL Server connection successful: Connected to {config['server']}/{config['database']}")
             connection_success = True
         except Exception as e:
-            result.append(f"✗ SQL Server接続失敗: {str(e)}")
+            result.append(f"✗ SQL Server connection failed: {str(e)}")
             if detailed:
-                result.append("詳細なエラー情報:")
+                result.append("Detailed error information:")
                 result.append(traceback.format_exc())
             
-            # エラーの種類に応じたヒントを表示
+            # Display hints based on error type
             error_str = str(e).lower()
             if "timeout" in error_str:
-                result.append("  - ネットワークのタイムアウトが発生しました")
-                result.append("  - ファイアウォールの設定を確認してください")
-                result.append("  - タイムアウト時間を長くしてみてください")
+                result.append("  - Network timeout occurred")
+                result.append("  - Check firewall settings")
+                result.append("  - Try increasing timeout duration")
             elif "login failed" in error_str:
-                result.append("  - ユーザー名またはパスワードが間違っています")
-                result.append("  - SQLユーザーがこのデータベースにアクセス権限を持っているか確認してください")
+                result.append("  - Username or password is incorrect")
+                result.append("  - Verify SQL user has access permissions to this database")
             elif "database" in error_str and "not exist" in error_str:
-                result.append("  - 指定されたデータベースが存在しません")
+                result.append("  - Specified database does not exist")
             elif "driver" in error_str:
-                result.append("  - 指定されたODBCドライバーが見つかりません")
-                result.append(f"  - 利用可能なドライバー: {', '.join(pyodbc.drivers())}")
+                result.append("  - Specified ODBC driver not found")
+                result.append(f"  - Available drivers: {', '.join(pyodbc.drivers())}")
             elif "network" in error_str or "connection" in error_str:
-                result.append("  - ネットワーク接続に問題があります")
-                result.append("  - サーバー名が正しいか確認してください")
-                result.append("  - SQL Serverが実行中か確認してください")
+                result.append("  - Network connection issue")
+                result.append("  - Verify server name is correct")
+                result.append("  - Ensure SQL Server is running")
             connection_success = False
         
         if not connection_success:
             return [TextContent(type="text", text="\n".join(result))]
         
-        # ステップ3: テストクエリの実行
-        result.append("\nステップ3: テストクエリの実行...")
+        # Step 3: Execute test query
+        result.append("\nStep 3: Executing test query...")
         
         try:
-            with measure_time("クエリ実行"):
+            with measure_time("Query execution"):
                 cursor = conn.cursor()
                 
-                # カスタムクエリの実行またはバージョン情報のクエリ
+                # Execute custom query or version info query
                 if custom_query:
-                    result.append(f"カスタムクエリを実行: {custom_query}")
+                    result.append(f"Executing custom query: {custom_query}")
                     cursor.execute(custom_query)
                 else:
                     cursor.execute("SELECT @@VERSION")
@@ -1057,65 +1221,54 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 cursor.close()
             
             if custom_query:
-                result.append(f"✓ カスタムクエリ実行成功:")
+                result.append(f"✓ Custom query execution successful:")
                 if cursor.description:
                     columns = [desc[0] for desc in cursor.description]
                     result.append(",".join(columns))
-                    for row in rows[:10]:  # 最大10行まで表示
+                    for row in rows[:10]:  # Display up to 10 rows
                         result.append(",".join(map(str, row)))
                     if len(rows) > 10:
-                        result.append(f"... 他 {len(rows) - 10} 行")
+                        result.append(f"... {len(rows) - 10} more rows")
             else:
-                result.append(f"✓ クエリ実行成功:")
-                result.append(f"  - SQL Serverバージョン: {rows[0][0][:100]}...")
+                result.append(f"✓ Query execution successful:")
+                result.append(f"  - SQL Server version: {rows[0][0][:100]}...")
             
             query_success = True
         except Exception as e:
-            result.append(f"✗ クエリ実行失敗: {str(e)}")
+            result.append(f"✗ Query execution failed: {str(e)}")
             result.append(traceback.format_exc())
             query_success = False
         
-        # 接続を閉じる
+        # Close connection
         try:
             conn.close()
-            result.append("SQL Server接続を正常に閉じました")
+            result.append("SQL Server connection closed successfully")
         except:
             pass
         
-        # 最終結果
+        # Final result
         if query_success:
-            result.append("\n✓ すべてのテストが成功しました！SQL Server接続は正常に動作しています。")
+            result.append("\n✓ All tests passed! SQL Server connection is working properly.")
         else:
-            result.append("\n✗ テストに失敗しました。上記のエラーメッセージを確認してください。")
+            result.append("\n✗ Tests failed. Please check the error messages above.")
         
-        # 環境設定からの接続テスト
+        # Environment configuration connection test
         try:
             env_config = load_env_config()
             if env_config:
-                result.append("\n=== 環境設定からの接続テスト ===")
+                result.append("\n=== Environment Configuration Connection Test ===")
                 test_success = test_connection(env_config)
                 if test_success:
-                    result.append("✓ 環境設定からの接続も成功しました！")
+                    result.append("✓ Environment configuration connection also successful!")
                 else:
-                    result.append("✗ 環境設定からの接続テストに失敗しました。")
+                    result.append("✗ Environment configuration connection test failed.")
         except Exception as e:
-            result.append(f"\n環境設定のロード中にエラーが発生しました: {str(e)}")
+            result.append(f"\nError occurred while loading environment configuration: {str(e)}")
         
         return [TextContent(type="text", text="\n".join(result))]
         
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
-
-# カスタムサーバークラスを作成して継承ベースで拡張
-class ExtendedMcpServer(Server):
-    def __init__(self, name: str):
-        super().__init__(name)
-        # 通知ハンドラーを正式に登録
-        self._notification_handlers["notifications/cancelled"] = self._handle_cancelled
-    
-    async def _handle_cancelled(self, params: CancelledNotificationParams):
-        # キャンセル処理の実装
-        pass
 
 async def main():
     """Main entry point to run the MCP server."""
